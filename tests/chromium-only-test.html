@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chromium-only test page</title>
+<style>
+  :root { --ink:#18212b; --muted:#5a6573; --line:#d5dbe2; --ok:#1d7f4e; --bad:#b4232a; --accent:#1f7f9e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui, sans-serif; color:var(--ink); background:#f4f6f8; }
+  main { max-width:62rem; margin:0 auto; padding:1.5rem 1.25rem 4rem; }
+  h1 { font-size:1.9rem; margin:.2rem 0 .3rem; }
+  h2 { font-size:1.15rem; margin:0 0 .6rem; }
+  .engine { font-size:1.05rem; color:var(--muted); margin:0 0 1rem; }
+  .engine b { color:var(--ink); }
+  .score { display:inline-block; font-weight:700; padding:.25rem .7rem; border-radius:999px; background:#fff; border:1px solid var(--line); }
+  section { background:#fff; border:1px solid var(--line); border-radius:12px; padding:1.1rem 1.2rem; margin:1rem 0; }
+  .muted { color:var(--muted); }
+
+  /* ---- 1. user-agent gate (the most common real-world breakage) ---- */
+  .gate { border-radius:10px; padding:1rem; }
+  .gate.blocked { background:#fdeaea; border:2px dashed var(--bad); }
+  .gate.open { background:#e6f4ec; border:2px solid var(--ok); }
+
+  /* ---- 2. visual demos that need Chromium-only CSS ---- */
+  .bars { display:flex; align-items:flex-end; gap:6px; height:120px; padding:6px; background:#f4f6f8; border-radius:8px; }
+  .bars span {
+    flex:1; border-radius:4px 4px 0 0; background:var(--accent);
+    height:12px;                                   /* fallback: flat */
+    height:calc(sibling-index() * 11px);           /* Chromium: staircase */
+  }
+  .theme-box {
+    --mode: dark;
+    padding:.8rem; border-radius:8px; font-weight:600;
+    background:#ddd; color:#333;                    /* fallback */
+    background:if(style(--mode: dark): #18212b; else: #fff);
+    color:if(style(--mode: dark): #fff; else: #000);
+  }
+  .grow { field-sizing:content; min-width:10ch; max-width:100%; font:inherit; padding:.35rem .5rem; border:1px solid var(--line); border-radius:6px; }
+  .scroller { height:130px; overflow-y:scroll; border:1px solid var(--line); border-radius:8px; padding:0 .6rem .6rem; }
+  .progress-track { position:sticky; top:0; height:8px; margin:0 -.6rem; background:#e6ebf0; overflow:clip; }
+  .progress-bar {
+    height:100%; width:0; background:var(--accent);
+    animation:fillbar auto linear both;
+    animation-timeline:scroll(nearest block);   /* the box this bar sits in */
+  }
+  @keyframes fillbar { to { width:100%; } }
+  select.custom, select.custom::picker(select) { appearance: base-select; }
+  select.custom { font:inherit; padding:.4rem .6rem; border:2px solid var(--accent); border-radius:8px; background:#fff; }
+  select.custom::picker(select) { border:2px solid var(--accent); border-radius:8px; padding:.3rem; }
+  select.custom option::checkmark { content:"✓ "; color:var(--accent); }
+
+  .demo-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(17rem, 1fr)); gap:1rem; }
+  .demo h3 { font-size:.95rem; margin:0 0 .4rem; }
+  .demo .verdict { font-size:.85rem; margin-top:.4rem; }
+
+  /* ---- 3. results table ---- */
+  table { width:100%; border-collapse:collapse; font-size:.95rem; }
+  th, td { text-align:left; padding:.45rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
+  .yes { color:var(--ok); font-weight:700; }
+  .no  { color:var(--bad); font-weight:700; }
+  code { font-size:.88em; background:#eef1f4; padding:.05rem .3rem; border-radius:4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Chromium-only test page</h1>
+  <p class="engine">This page is being rendered by <b id="engine">…</b> <span class="score" id="score"></span></p>
+  <p class="muted">Every check below runs live in whatever engine is showing this page. Open it in a Gecko tab, then switch the tab to Blink and compare.</p>
+
+  <section>
+    <h2>1. A site that blocks Firefox</h2>
+    <p class="muted">Many real sites check the browser’s name instead of testing features, then refuse to run. This mimics one.</p>
+    <div id="gate" class="gate"></div>
+  </section>
+
+  <section>
+    <h2>2. Things that look wrong without Chromium-only CSS</h2>
+    <div class="demo-grid">
+      <div class="demo">
+        <h3>Staircase chart (<code>sibling-index()</code>)</h3>
+        <div class="bars" id="bars"></div>
+        <div class="verdict" data-check="sibling-index"></div>
+      </div>
+      <div class="demo">
+        <h3>Conditional theme (<code>if()</code>)</h3>
+        <div class="theme-box" id="theme">Dark card, white text</div>
+        <div class="verdict" data-check="css-if"></div>
+      </div>
+      <div class="demo">
+        <h3>Self-sizing input (<code>field-sizing</code>)</h3>
+        <input class="grow" value="Type more and I grow" aria-label="Self-sizing input">
+        <div class="verdict" data-check="field-sizing"></div>
+      </div>
+      <div class="demo">
+        <h3>Scroll progress bar (<code>animation-timeline</code>)</h3>
+        <div class="scroller" tabindex="0">
+          <div class="progress-track"><div class="progress-bar" id="pbar"></div></div>
+          <p>Scroll this box. The bar at its top should fill as you scroll.</p>
+          <p>Scroll-driven animations tie animation progress to scroll position with no JavaScript.</p>
+          <p>Without them the bar stays empty.</p>
+          <p>Keep scrolling.</p><p>Almost there.</p><p>End.</p>
+        </div>
+        <div class="verdict" data-check="scroll-timeline"></div>
+      </div>
+      <div class="demo">
+        <h3>Styled dropdown (<code>appearance: base-select</code>)</h3>
+        <select class="custom" aria-label="Styled dropdown">
+          <option>Gecko</option><option selected>Blink</option><option>WebKit</option>
+        </select>
+        <div class="verdict" data-check="base-select"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3. Full results</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Used by</th><th>Here</th></tr></thead>
+      <tbody id="results"></tbody>
+    </table>
+    <p class="muted" style="margin-top:.8rem">Device APIs (USB, serial, HID, Bluetooth) are only detected here, not used. In this prototype’s embedded Chromium, features that need a Chrome permission prompt or device picker may be detected but still not work.</p>
+  </section>
+</main>
+
+<script>
+(function () {
+  const ua = navigator.userAgent;
+  const chromeVer = (ua.match(/Chrome\/([\d.]+)/) || [])[1];
+  const ffVer = (ua.match(/Firefox\/([\d.]+)/) || [])[1];
+  document.getElementById("engine").textContent =
+    chromeVer ? "Blink (Chromium " + chromeVer + ")" :
+    ffVer ? "Gecko (Firefox " + ffVer + ")" : "an unknown engine";
+
+  // Measure a computed width to detect CSS functions CSS.supports can't test.
+  function measure(style, extra) {
+    const host = document.createElement("div");
+    host.style.cssText = "position:absolute;visibility:hidden;display:flex";
+    const el = document.createElement("div");
+    el.setAttribute("style", style);
+    if (extra) extra(el);
+    host.append(document.createElement("div"), el);
+    document.body.append(host);
+    const w = el.getBoundingClientRect().width;
+    host.remove();
+    return w;
+  }
+
+  const checks = [
+    { id: "sibling-index", name: "CSS sibling-index()", use: "Staggered layouts and animations",
+      test: () => measure("flex:none;width:calc(sibling-index() * 10px)") === 20 },
+    { id: "css-if", name: "CSS if()", use: "Conditional styling without extra classes",
+      test: () => measure("--m:1;flex:none;width:if(style(--m: 1): 33px; else: 5px)") === 33 },
+    { id: "attr-typed", name: "Typed CSS attr()", use: "Styling from data attributes",
+      test: () => measure("flex:none;width:attr(data-w px, 1px)", el => el.dataset.w = "44") === 44 },
+    { id: "field-sizing", name: "CSS field-sizing", use: "Auto-growing inputs and text areas",
+      test: () => CSS.supports("field-sizing", "content") },
+    { id: "scroll-timeline", name: "Scroll-driven animations", use: "Reading progress bars, parallax",
+      test: () => CSS.supports("animation-timeline", "scroll()") },
+    { id: "base-select", name: "Customizable <select>", use: "Branded dropdowns",
+      test: () => CSS.supports("appearance", "base-select") },
+    { id: "text-box", name: "CSS text-box trim", use: "Precise vertical text alignment",
+      test: () => CSS.supports("text-box", "trim-both cap alphabetic") },
+    { id: "fs-access", name: "File System Access (folder picker)", use: "Web IDEs and editors opening local folders",
+      test: () => "showDirectoryPicker" in window },
+    { id: "doc-pip", name: "Document Picture-in-Picture", use: "Floating call controls, mini players",
+      test: () => "documentPictureInPicture" in window },
+    { id: "eyedropper", name: "EyeDropper", use: "Design tools picking colors on screen",
+      test: () => "EyeDropper" in window },
+    { id: "local-fonts", name: "Local Font Access", use: "Design tools listing installed fonts",
+      test: () => "queryLocalFonts" in window },
+    { id: "webusb", name: "WebUSB", use: "Flashing firmware, hardware keys",
+      test: () => "usb" in navigator },
+    { id: "webserial", name: "Web Serial", use: "Microcontroller and 3D-printer tools",
+      test: () => "serial" in navigator },
+    { id: "webhid", name: "WebHID", use: "Game controllers, macro pads",
+      test: () => "hid" in navigator },
+    { id: "bluetooth", name: "Web Bluetooth", use: "Fitness devices, smart home setup",
+      test: () => "bluetooth" in navigator },
+  ];
+
+  const results = {};
+  let passed = 0;
+  const tbody = document.getElementById("results");
+  for (const c of checks) {
+    let ok = false;
+    try { ok = !!c.test(); } catch (e) { ok = false; }
+    results[c.id] = ok;
+    if (ok) passed++;
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td></td><td class='muted'></td><td></td>";
+    tr.children[0].textContent = c.name;
+    tr.children[1].textContent = c.use;
+    tr.children[2].textContent = ok ? "Supported" : "Missing";
+    tr.children[2].className = ok ? "yes" : "no";
+    tbody.append(tr);
+  }
+  document.getElementById("score").textContent = passed + " of " + checks.length + " supported";
+
+  for (const v of document.querySelectorAll("[data-check]")) {
+    const ok = results[v.dataset.check];
+    v.textContent = ok ? "✓ Works in this engine" : "✗ Not supported here, so this falls back or looks broken";
+    v.className = "verdict " + (ok ? "yes" : "no");
+  }
+
+  window.__barFill = () => {
+    const b = document.getElementById("pbar");
+    return Math.round(100 * b.getBoundingClientRect().width / b.parentElement.getBoundingClientRect().width);
+  };
+  const bars = document.getElementById("bars");
+  for (let i = 0; i < 10; i++) bars.append(document.createElement("span"));
+
+  // The user-agent gate: decides by name, like many real sites do.
+  const gate = document.getElementById("gate");
+  if (/Chrome\//.test(ua)) {
+    gate.className = "gate open";
+    gate.innerHTML = "<b>Welcome!</b> The app loaded. (The site saw “Chrome” in the browser name and let you in.)";
+  } else {
+    gate.className = "gate blocked";
+    gate.innerHTML = "<b>Your browser is not supported.</b> Please use Google Chrome or Microsoft Edge to continue. (The site saw “Firefox” in the browser name and refused, without checking what Firefox can do.)";
+  }
+})();
+</script>
+</body>
+</html>
