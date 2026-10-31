@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Start the hybrid browser (Firefox's engine + Chromium's engine, one window).
+#   ./hybrid [--debug] [firefox arguments...]
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+FF="$ROOT/third_party/firefox/firefox"
+HOST="$ROOT/engine/build/out/chromium-host"
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/hybrid-browser"
+
+warn() { printf '\033[1;33mhybrid:\033[0m %s\n' "$*" >&2; }
+
+if [[ ! -x "$FF" || ! -x "$HOST" ]]; then
+  echo "The browser isn't built yet. Run: $ROOT/setup.sh" >&2
+  exit 1
+fi
+
+if [[ "${1:-}" == "--debug" ]]; then
+  export HYBRID_DEBUG=1
+  shift
+fi
+
+# Chromium views are embedded as X11 child windows, so both engines run on
+# X11. On Wayland desktops that means XWayland, which GNOME and KDE start
+# automatically.
+if [[ -z "${DISPLAY:-}" ]]; then
+  echo "No X11 display found. On a Wayland desktop, make sure XWayland is enabled." >&2
+  exit 1
+fi
+export MOZ_ENABLE_WAYLAND=0
+export GDK_BACKEND=x11
+
+export HYBRID_ROOT="$ROOT"
+export HYBRID_HOST="$HOST"
+# The WebKit engine is optional (built when WebKitGTK is installed).
+WEBKIT_HOST="$ROOT/engine/build/webkit/webkit-host"
+if [[ -x "$WEBKIT_HOST" ]]; then
+  export HYBRID_WEBKIT_HOST="$WEBKIT_HOST"
+fi
+export HYBRID_CHROMIUM_PROFILE="$DATA/chromium"
+mkdir -p "$DATA/firefox-profile" "$DATA/chromium"
+
+# Chromium's sandbox needs unprivileged user namespaces, or a setuid
+# chrome-sandbox helper when the distro restricts them (Ubuntu 23.10+).
+sandbox=1
+userns_blocked=0
+[[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" == 1 ]] && userns_blocked=1
+[[ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 1)" == 0 ]] && userns_blocked=1
+if (( userns_blocked )) && [[ ! -u "$ROOT/engine/build/out/chrome-sandbox" ]]; then
+  sandbox=0
+  warn "Your system restricts user namespaces, so Chromium tabs will run WITHOUT"
+  warn "Chromium's sandbox. To enable it, run once:"
+  warn "  sudo chown root:root '$ROOT/engine/build/out/chrome-sandbox'"
+  warn "  sudo chmod 4755 '$ROOT/engine/build/out/chrome-sandbox'"
+fi
+[[ "$(id -u)" == 0 ]] && sandbox=0
+(( sandbox )) || export HYBRID_NO_SANDBOX=1
+
+# Profile defaults for the prototype (only written once).
+PREFS="$DATA/firefox-profile/user.js"
+if [[ ! -f "$PREFS" ]]; then
+  cat > "$PREFS" <<'PREFS_EOF'
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
+// Send the hybrid layer's console output to the terminal too.
+user_pref("devtools.console.stdout.chrome", true);
+user_pref("browser.dom.window.dump.enabled", true);
+PREFS_EOF
+fi
+
+exec "$FF" --profile "$DATA/firefox-profile" --no-remote "$@"
