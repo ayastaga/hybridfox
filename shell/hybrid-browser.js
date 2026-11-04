@@ -835,7 +835,7 @@
       const current = tab._hybrid?.engine || "gecko";
       for (const item of popup.children) {
         const engine = item.getAttribute("engine");
-        item.setAttribute("checked", engine === current ? "true" : "false");
+        item.toggleAttribute("checked", engine === current);
         item.toggleAttribute("disabled", engine !== "gecko" && !!(engineFailures[engine] || HybridHost.failureOf(engine)));
       }
     });
@@ -887,7 +887,7 @@
       const engine = ruleEngine(tab);
       ruleItem.hidden = !site || isPrivate || !!HybridHost.failureOf(engine);
       ruleItem.setAttribute("label", `Always Open ${site} with ${MENU_LABEL[engine]}`);
-      ruleItem.setAttribute("checked", ruleFor(site) === engine ? "true" : "false");
+      ruleItem.toggleAttribute("checked", ruleFor(site) === engine);
     });
     ruleItem.addEventListener("command", () => {
       const tab = contextTab();

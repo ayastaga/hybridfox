@@ -33,8 +33,9 @@ sudo pacman -S --needed curl xz bzip2 python cmake gcc make libx11
 ## Build and run
 
 ```bash
-./setup.sh      # downloads CEF + Firefox, builds the engine host (~10 min)
-./hybrid        # starts the browser
+chmod +x setup.sh   # make the setup script executable
+./setup.sh          # downloads CEF + Firefox, builds the engine host (~10 min)
+./hybrid            # starts the browser
 ```
 
 ### Installing as a .deb (Debian, Ubuntu)

@@ -1,0 +1,11 @@
+# Downloaded by setup.sh (Firefox and CEF, ~2 GB)
+third_party/
+
+# Build output
+engine/build/
+*.deb
+.deb-stage*/
+
+# Python
+__pycache__/
+*.pyc
