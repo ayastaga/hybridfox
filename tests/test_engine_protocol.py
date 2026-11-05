@@ -34,6 +34,41 @@ def test_start_and_attach(engine, start_host, parent):
     assert attached["focusProxy"] is True
 
 
+def test_marker_applied_late_still_attaches(engine, parent):
+    """Firefox may retitle its window while an engine looks for the marker
+    (so the shell re-applies it); the host must keep looking until it shows."""
+    import os
+    from hostlib import Host
+    from conftest import ARTIFACTS
+    h = Host(engine, os.path.join(ARTIFACTS, f"test_marker_late-{engine}.log"))
+    try:
+        h.wait_event("ready", timeout=30)
+        parent.set_title("Some page - Mozilla Firefox")
+        h.send(cmd="attach", win=1, marker=parent.marker)
+        time.sleep(1)
+        parent.set_title(parent.marker)
+        assert int(h.wait_event("attached", win=1)["xid"]) == parent.win.id
+    finally:
+        h.quit()
+
+
+def test_unfocus_hands_keyboard_to_focus_proxy(engine, start_host, parent, site):
+    """GTK only takes keys through its 1x1 focus proxy; giving focus to the
+    toplevel itself delivers keys nowhere."""
+    h = start_host(engine)
+    h.create(1, site.url("/"))
+    parent.click(W // 2, TOP + 300)  # the view takes the keyboard
+    deadline = time.time() + 5
+    while parent.d.get_input_focus().focus.id in (parent.proxy.id, parent.win.id) and time.time() < deadline:
+        time.sleep(0.1)
+    assert parent.d.get_input_focus().focus.id not in (parent.proxy.id, parent.win.id)
+    h.send(cmd="unfocus", win=1)
+    deadline = time.time() + 5
+    while parent.d.get_input_focus().focus.id != parent.proxy.id and time.time() < deadline:
+        time.sleep(0.1)
+    assert parent.d.get_input_focus().focus.id == parent.proxy.id
+
+
 def test_renders_non_blank(engine, start_host, parent, site):
     h = start_host(engine)
     h.create(1, site.url("/"))

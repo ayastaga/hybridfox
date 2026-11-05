@@ -205,28 +205,42 @@ The cost: a sign-in that lives only in a container, or a third-party
 embed's partitioned cookie, isn't carried into engine tabs. Sign-ins made
 in normal (and private) tabs are.
 
-## Testing the engine on its own
+## Running the tests
+
+The tests need an X server; `xvfb-run` provides a virtual one.
 
 ```bash
-pip install python-xlib
-python3 engine/test_host.py engine/build/out/chromium-host /tmp/shots
+sudo apt install xvfb python3-xlib python3-pytest   # Debian/Ubuntu
+./setup.sh                                          # build first
+python3 scripts/deps.py fetch-test-addons           # uBlock Origin, for one test
+xvfb-run -a -s "-screen 0 1280x1024x24" python3 -m pytest -v tests/
 ```
 
-This opens a stand-in browser window, drives the engine through the same
-protocol and saves screenshots: create, background tab, tab switch, resize,
-live navigation, close and quit.
+- `tests/test_engine_protocol.py` drives each engine host directly
+  through its line protocol, with a stand-in for Firefox's window (an X11
+  window with Firefox's non-default visual), synthetic clicks (XTEST) and
+  pixels read back from the X server.
+- `tests/test_browser.py` drives the real browser through Marionette
+  (Firefox's remote-control protocol). It starts `./hybrid` with a
+  temporary profile and `HYBRID_TEST=1`, which adds a small
+  `window.HybridTest` hook for the tests.
+- `tests/test_deps.py` checks the pinned downloads offline;
+  `tests/test_repo.py` checks for mistakes that were made once.
 
-## Testing sign-in across engines
+Results are checked through `tests/signin_site.py`, a small local site
+that records every request it serves (`/_log`): which engine asked (from
+the User-Agent) and who was signed in. Logs of each test's engine and
+browser output land in `tests/artifacts/`.
+
+To try sign-ins by hand:
 
 ```bash
-python3 tests/signin_site.py &      # a small sign-in site on http://127.0.0.1:8765
+python3 tests/signin_site.py &      # http://127.0.0.1:8765
 ./hybrid http://127.0.0.1:8765/
 ```
 
-Sign in, switch the tab's engine with Ctrl+Alt+E, and check you're still
-signed in. The site also has a popup sign-in and a `confirm()` test.
-`tests/chromium-only-test.html` shows features that work in Chromium but not
-in Firefox.
+`tests/chromium-only-test.html` shows features that work in Chromium but
+not in Firefox.
 
 ## Troubleshooting
 
@@ -302,9 +316,16 @@ engine/
   chromium_host.cc  the Chromium engine host
   webkit_host.c     the WebKit engine host (built when WebKitGTK is installed)
   CMakeLists.txt
-  test_host.py      standalone engine test
+  test_host.py      older standalone engine smoke test (superseded by tests/)
+scripts/
+  deps.py           pinned downloads (fetch, update, fetch-test-addons)
+versions.json       the pinned Firefox, CEF and test add-on builds, with checksums
 tests/
-  signin_site.py    local sign-in site for testing shared logins
+  test_engine_protocol.py  engine hosts through their line protocol
+  test_browser.py   the real browser through Marionette
+  test_deps.py, test_repo.py  downloads, and checks for past mistakes
+  hostlib.py, marionette.py, conftest.py  test helpers
+  signin_site.py    local sign-in site that records each request
   chromium-only-test.html  page that works in Chromium but not Firefox
 third_party/        CEF and Firefox (created by setup.sh)
 ```

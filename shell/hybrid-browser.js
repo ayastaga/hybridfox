@@ -69,6 +69,9 @@
       case "blocked":
         if (!h) break;
         h.blocked++;
+        // The last few, for debugging and tests.
+        h.blockedLog.push({ url: ev.url, kind: ev.kind, reason: ev.reason });
+        if (h.blockedLog.length > 50) h.blockedLog.shift();
         debug("blocked", ev.reason, ev.url);
         if (tab.selected) updateChrome();
         break;
@@ -82,7 +85,10 @@
         break;
       case "loading":
         if (!h) break;
-        if (ev.loading && !h.loading) h.blocked = 0;
+        if (ev.loading && !h.loading) {
+          h.blocked = 0;
+          h.blockedLog = [];
+        }
         if (!ev.loading) recordHistory(h);
         h.loading = ev.loading;
         h.canGoBack = ev.canGoBack;
@@ -231,7 +237,7 @@
     return {
       engine, id, url, title, visible,
       loading: true, canGoBack: false, canGoForward: false,
-      dialogs: 0, zoom: 1, blocked: 0,
+      dialogs: 0, zoom: 1, blocked: 0, blockedLog: [],
     };
   }
 
@@ -1205,6 +1211,7 @@
             loading: h ? h.loading : tab.hasAttribute("busy"),
             dead: tab.hasAttribute("hybrid-dead"),
             blocked: h?.blocked ?? 0,
+            blockedLog: h?.blockedLog ?? [],
             identity,
             identityOrigin: h?.identityOrigin ?? null,
             reapplied: h?.reapplied ?? 0,
@@ -1217,6 +1224,17 @@
         tooltip: engineButton.getAttribute("tooltiptext"),
       }),
       host: () => HybridHost.debugState(),
+      // Navigate or reload a tab as the address bar and reload button do.
+      navigate(index, url) {
+        const tab = tabAt(index);
+        if (tab._hybrid) redirect(tab, url);
+        else geckoLoad(tab.linkedBrowser, url);
+      },
+      reload(index) {
+        const tab = tabAt(index);
+        if (tab._hybrid) send(tab._hybrid.engine, { cmd: "reload", id: tab._hybrid.id });
+        else tab.linkedBrowser.reload();
+      },
       setRule: (site, engine) => setRule(site, engine),
       rules: () => getRules(),
       probe: (url, type) => probe({ id: gBrowser.selectedTab._hybrid?.id, url, type }),

@@ -238,3 +238,157 @@ def test_engine_gives_up_after_three_crashes(browser, site):
     assert browser.tab(i)["dead"]
     button = browser.m.js("return HybridTest.engineButton()")
     assert button["failed"] and button["label"] == "Blink · stopped", button
+
+
+# ------------------------------------------------- sign-ins across engines --
+
+def views(site, engine):
+    return [e for e in site.log() if e["path"] == "/" and e["engine"] == engine]
+
+
+def test_one_tab_through_three_engines_stays_signed_in(browser, site):
+    needs_webkit()
+    i = browser.m.js("return HybridTest.openTab(arguments[0])", site.url("/login?u=alice"))
+    for engine in ("gecko", "blink", "webkit"):
+        if engine != "gecko":
+            site.reset()
+            browser.m.js("HybridTest.switchEngine(arguments[0], null, arguments[1])", engine, i)
+        view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == engine, what=f"{engine} view")
+        assert view["user"] == "alice", (engine, view)
+        browser.wait_tab(i, lambda t: t["engine"] == engine and not t["loading"], what=f"{engine} tab")
+
+
+def test_webkit_sign_in_reaches_new_blink_tab(browser, site):
+    needs_webkit()
+    browser.m.js("return HybridTest.openTab(arguments[0], 'webkit')", site.url("/login?u=wendy"))
+    site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "webkit" and e["user"] == "wendy")
+    # WebKit -> Firefox: polled once a second.
+    browser.m.wait("""return Services.cookies.getCookiesFromHost('127.0.0.1', {})
+                        .some(c => c.name === 'session' && c.value === 'wendy')""", what="cookie in Firefox")
+    browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink", what="Blink view")
+    assert view["user"] == "wendy"
+
+
+def test_live_sign_out_relays_from_blink_to_webkit(browser, site):
+    needs_webkit()
+    browser.m.js(ADD_COOKIE, "127.0.0.1", "session", "alice", {})
+    b = browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    w = browser.m.js("return HybridTest.openTab(arguments[0], 'webkit')", site.url("/"))
+    site.wait_for(lambda e: e["engine"] == "blink" and e["user"] == "alice", what="Blink signed in")
+    site.wait_for(lambda e: e["engine"] == "webkit" and e["user"] == "alice", what="WebKit signed in")
+    # Sign out inside the Blink tab while the WebKit tab stays open.
+    browser.m.js("HybridTest.navigate(arguments[0], arguments[1])", b, site.url("/logout"))
+    browser.m.wait("""return !Services.cookies.getCookiesFromHost('127.0.0.1', {})
+                        .some(c => c.name === 'session')""", what="cookie gone from Firefox")
+    time.sleep(1)  # Firefox -> WebKit is pushed at once; allow for delivery
+    site.reset()
+    browser.m.js("HybridTest.reload(arguments[0])", w)
+    view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "webkit", what="WebKit reload")
+    assert view["user"] is None, view
+
+
+def test_engine_cookie_expiry_units(browser, site):
+    """Firefox 159 stores expiry in milliseconds; a cookie from an engine
+    (Max-Age=3600) must land about an hour from now, not in 1970 or 50000."""
+    browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/login?u=alice"))
+    expiry = browser.m.wait("""const c = Services.cookies.getCookiesFromHost('127.0.0.1', {})
+                                 .find(c => c.name === 'session' && c.value === 'alice');
+                               return c && c.expiry""", what="engine cookie in Firefox")
+    secs = expiry / 1000 if expiry > 1e11 else expiry
+    assert abs(secs - (time.time() + 3600)) < 300, expiry
+
+
+# ------------------------------------------------------------ private windows --
+
+OPEN_PRIVATE = """
+window._hybridPrivate = OpenBrowserWindow({ private: true });
+"""
+IN_PRIVATE = "const P = window._hybridPrivate; "
+
+
+def test_private_window_isolation_and_discard(browser, site):
+    browser.m.js(ADD_COOKIE, "127.0.0.1", "session", "alice", {})
+    browser.m.js(OPEN_PRIVATE)
+    browser.m.wait(IN_PRIVATE + "return P.HybridTest && P.HybridTest.isPrivate", what="private window layer")
+    browser.m.js(IN_PRIVATE + "P.HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink", what="private Blink view")
+    assert view["user"] is None  # normal sign-ins don't reach private windows
+    # Sign in privately; it must not leak into normal tabs.
+    browser.m.js(IN_PRIVATE + "P.HybridTest.navigate(null, arguments[0])", site.url("/login?u=pat"))
+    site.wait_for(lambda e: e["path"] == "/" and e["user"] == "pat", what="private sign-in")
+    assert browser.m.js("return HybridTest.rules()") == {}
+    browser.m.js(IN_PRIVATE + "P.HybridTest.setRule('127.0.0.1', 'blink')")
+    assert browser.m.js("return HybridTest.rules()") == {}  # no rules from private windows
+    site.reset()
+    browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    assert site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink")["user"] == "alice"
+    # Last private window closes: the private session ends everywhere.
+    browser.m.js(IN_PRIVATE + "P.close()")
+    browser.m.wait("return !HybridTest.host().engines.blink.jars.private.started", what="private jar ended")
+    assert "private session ended" in browser.log_text()
+    # A new private window starts empty.
+    browser.m.js(OPEN_PRIVATE)
+    browser.m.wait(IN_PRIVATE + "return P.HybridTest && P.HybridTest.isPrivate", what="second private window")
+    site.reset()
+    browser.m.js(IN_PRIVATE + "P.HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink", what="new private view")
+    assert view["user"] is None, view  # "pat" was discarded with the session
+
+
+# ---------------------------------------------------------------- site rules --
+
+def test_site_rule_opens_site_in_its_engine(browser, site):
+    needs_webkit()
+    browser.m.js("HybridTest.setRule('127.0.0.1', 'webkit')")
+    assert browser.m.js("return HybridTest.rules()") == {"127.0.0.1": "webkit"}
+    i = browser.m.js("return HybridTest.openTab(arguments[0])", site.url("/"))  # a Gecko load
+    browser.wait_tab(i, lambda t: t["engine"] == "webkit", what="rule switching the tab to WebKit")
+    view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "webkit", what="WebKit view")
+    assert view
+    # Choosing Gecko for the site in this tab sticks (no bounce back).
+    browser.m.js("HybridTest.switchEngine('gecko', null, arguments[0])", i)
+    browser.wait_tab(i, lambda t: t["engine"] == "gecko" and not t["loading"], what="back to Gecko")
+    time.sleep(1.5)
+    assert browser.tab(i)["engine"] == "gecko"
+    browser.m.js("HybridTest.setRule('127.0.0.1', null)")
+    assert browser.m.js("return HybridTest.rules()") == {}
+
+
+# ------------------------------------------------------------ uBlock Origin --
+
+UBLOCK = os.path.join(ROOT, "third_party/test-addons/ublock-origin.xpi")
+
+
+def test_ublock_origin_filters_blink_tab(browser, site):
+    """uBlock Origin, a real Firefox extension, decides a Blink tab's
+    requests through the extension bridge: its stand-in for the ad script
+    is served, and DoubleClick is blocked."""
+    if not os.path.exists(UBLOCK):
+        pytest.skip("run: scripts/deps.py fetch-test-addons")
+    browser.m.install_addon(UBLOCK)
+    browser.m.wait("return HybridTest.host().bridgeActive", what="bridge to notice the extension")
+    i = browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    browser.wait_tab(i, lambda t: t["identity"] == site.base, what="Blink tab with identity")
+    # uBlock Origin loads its filter lists after installing; until then it
+    # lets everything through. Ask through the bridge until it blocks.
+    deadline = time.time() + 60
+    verdict = None
+    while time.time() < deadline:
+        verdict = browser.m.js_async(
+            "HybridTest.probe('https://ad.doubleclick.net/ddm/ad/probe;sz=1x1', 4).then(resolve)")
+        if verdict.get("block"):
+            break
+        time.sleep(0.5)
+    assert verdict and verdict.get("block"), f"uBlock Origin never blocked through the bridge: {verdict}"
+    browser.m.js("HybridTest.navigate(arguments[0], arguments[1])", i, site.url("/ads-test"))
+    standin = site.report("standin", timeout=40)
+    assert standin == "true", "uBlock Origin's stand-in for adsbygoogle.js wasn't served"
+    t = browser.wait_tab(i, lambda t: any("doubleclick.net" in b["url"] for b in t["blockedLog"]),
+                         what="DoubleClick blocked")
+    dc = [b for b in t["blockedLog"] if "doubleclick.net" in b["url"]]
+    assert dc[0]["reason"] == "extension", t["blockedLog"]
+    # The real adsbygoogle.js would also define adsbygoogle.loaded, so check
+    # the engine served a body uBlock Origin substituted, not the real file.
+    ads = [b for b in t["blockedLog"] if "adsbygoogle.js" in b["url"]]
+    assert ads and ads[0]["reason"] == "replaced by an extension", t["blockedLog"]
