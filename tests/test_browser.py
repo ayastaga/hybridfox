@@ -174,3 +174,67 @@ def test_isolated_cookies_stay_in_firefox(browser, site):
     browser.m.js("BrowserCommands.reload()")
     view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink", what="reloaded view")
     assert view["user"] == "plain", view
+
+
+# --------------------------------------------------------- crash recovery --
+
+def blink_state(browser):
+    return browser.host()["engines"]["blink"]
+
+
+def kill_blink(browser):
+    """Kill the Blink host like a crash would; return its pid."""
+    pid = blink_state(browser)["pid"]
+    assert pid
+    os.kill(pid, signal.SIGKILL)
+    return pid
+
+
+def wait_new_blink(browser, old_pid, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        st = blink_state(browser)
+        if st["ready"] and st["pid"] and st["pid"] != old_pid:
+            return st
+        time.sleep(0.25)
+    raise AssertionError(f"Blink host wasn't restarted: {blink_state(browser)}")
+
+
+def test_engine_crash_reopens_tabs(browser, site):
+    # Signed in inside the engine before the crash.
+    i = browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/login?u=alice"))
+    site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink" and e["user"] == "alice")
+    before = browser.wait_tab(i, lambda t: t["engine"] == "blink" and not t["loading"], what="Blink tab")
+    time.sleep(1.5)  # the engine reports its cookies to Firefox once a second
+    site.reset()
+    old = kill_blink(browser)
+    st = wait_new_blink(browser, old)
+    assert st["restarts"] == 1 and st["failure"] is None
+    # Reopened in the new process: same tab id, same address, loaded again.
+    # ...and still signed in: the new process got Firefox's cookie jar.
+    view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink", what="tab reloaded after the crash")
+    assert view["user"] == "alice", view
+    after = browser.wait_tab(i, lambda t: not t["loading"], what="reopened tab")
+    assert after["engine"] == "blink" and after["id"] == before["id"] and after["url"] == before["url"]
+    assert not after["dead"]
+    assert "stopped" not in browser.m.js("return HybridTest.engineButton().label")
+
+
+def test_engine_gives_up_after_three_crashes(browser, site):
+    i = browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    browser.wait_tab(i, lambda t: t["engine"] == "blink" and not t["loading"], what="Blink tab")
+    pid = kill_blink(browser)
+    pid = wait_new_blink(browser, pid)["pid"]
+    os.kill(pid, signal.SIGKILL)
+    pid = wait_new_blink(browser, pid)["pid"]
+    os.kill(pid, signal.SIGKILL)  # third crash within two minutes
+    deadline = time.time() + 15
+    while time.time() < deadline and not blink_state(browser)["failure"]:
+        time.sleep(0.25)
+    st = blink_state(browser)
+    assert st["failure"] and "3 times" in st["failure"], st
+    time.sleep(2)
+    assert not blink_state(browser)["running"]  # not restarted again
+    assert browser.tab(i)["dead"]
+    button = browser.m.js("return HybridTest.engineButton()")
+    assert button["failed"] and button["label"] == "Blink · stopped", button

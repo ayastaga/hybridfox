@@ -129,6 +129,27 @@
     updateChrome();
   }
 
+  // The engine's process crashed and HybridHost is starting a new one.
+  // Reopen this window's tabs on it where they were, with the same tab
+  // ids, so nothing else needs to know. Page state (form input, scroll
+  // position) is lost, as after a reload.
+  function onEngineRestart(engine) {
+    for (const tab of tabsById.values()) {
+      const h = tab._hybrid;
+      if (h.engine !== engine) continue;
+      log(`reopening ${LABEL[engine]} tab`, h.id, "at", h.url);
+      h.loading = true;
+      h.dialogs = 0;
+      h.visible = tab.selected && !overlayOpen;
+      h.rect = contentRect();
+      send(engine, { cmd: "create", id: h.id, win: winId, jar: JAR, url: h.url, visible: h.visible, ...h.rect });
+      if (h.zoom !== 1) send(engine, { cmd: "zoom", id: h.id, level: Math.log(h.zoom) / Math.log(1.2) });
+      if (tab.selected) send(engine, { cmd: "focus", id: h.id });
+    }
+    HybridHost.use(engine, winId);
+    updateChrome();
+  }
+
   // ------------------------------------------------------- tab plumbing --
 
   function contentRect() {
@@ -226,6 +247,7 @@
 
   function engineLabel(h) {
     let label = LABEL[h.engine];
+    if (engineFailures[h.engine]) return `${label} · stopped`;
     if (h.zoom !== 1) label += ` ${Math.round(h.zoom * 100)}%`;
     if (h.blocked) label += ` · ${h.blocked} blocked`;
     return label;
@@ -672,7 +694,9 @@
     engineButton.toggleAttribute("failed", !!(h && engineFailures[h.engine]));
     engineButton.setAttribute(
       "tooltiptext",
-      h
+      h && engineFailures[h.engine]
+        ? engineFailures[h.engine]
+        : h
         ? `This tab runs on the ${MENU_LABEL[h.engine]}, with Firefox’s tracking protection and Safe Browsing` +
             (h.blocked ? ` (${h.blocked} blocked on this page)` : "") + ". Click to choose an engine (Ctrl+Alt+E cycles)."
         : "This tab runs on Firefox’s engine. Click to choose an engine (Ctrl+Alt+E cycles)."
@@ -1205,7 +1229,7 @@
 
   winId = HybridHost.registerWindow(
     window,
-    { onEvent: onHostEvent, onEngineFail, probe },
+    { onEvent: onHostEvent, onEngineFail, onEngineRestart, probe },
     isPrivate
   );
   updateChrome();
