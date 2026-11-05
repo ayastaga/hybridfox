@@ -309,7 +309,7 @@
         // allowed requests then stop at "not cached" without any network.
         ch.loadFlags |= Ci.nsIRequest.LOAD_FROM_CACHE | Ci.nsICachingChannel.LOAD_ONLY_FROM_CACHE;
       } catch (e) {
-        reply({ allow: true, note: "no channel: " + e });
+        reply({ noVerdict: true, note: "no channel: " + e });
         return;
       }
       let finalURL = "";
@@ -336,7 +336,7 @@
           },
         });
       } catch (e) {
-        reply({ allow: true, note: "open failed: " + e });
+        reply({ noVerdict: true, note: "open failed: " + e });
       }
     });`;
 
@@ -408,12 +408,43 @@
     browser.messageManager.sendAsyncMessage("hybrid:address", { url: h.url });
   }
 
+  // The placeholder's own about:blank load, started when the tab switched
+  // engines, can finish after the identity above was applied and replace
+  // that document with a plain one; extension checks would then run without
+  // the site's identity. So when the placeholder reports about:blank, apply
+  // the identity again unless it's already in place. The document
+  // createAboutBlankDocumentViewer makes carries the identity itself, so
+  // re-applying can't loop; the cap is a second guard.
+  const MAX_REAPPLY = 3;
+  function identityInPlace(tab) {
+    try {
+      return tab.linkedBrowser.contentPrincipal?.originNoSuffix === tab._hybrid.identityOrigin;
+    } catch (e) {
+      return false;
+    }
+  }
+  function reapplyIdentity(tab) {
+    const h = tab._hybrid;
+    if (!h?.identityOrigin || identityInPlace(tab)) return;
+    h.reapplied = (h.reapplied || 0) + 1;
+    if (h.reapplied > MAX_REAPPLY) {
+      debug("placeholder identity keeps getting replaced; giving up for", h.identityOrigin);
+      return;
+    }
+    debug("placeholder lost its identity; re-applying", h.identityOrigin);
+    h.identityOrigin = null;
+    mirrorIdentity(tab);
+  }
+
   // Asked by HybridHost for each engine request while request-filtering
-  // extensions are installed.
+  // extensions are installed. Anything short of an answer from the
+  // extensions (tab gone, no channel, no reply in time) is "no verdict",
+  // which HybridHost turns into a block for subresources.
+  const PROBE_TIMEOUT_MS = 1000;
   function probe(ev) {
     const tab = tabsById.get(ev.id);
     const h = tab?._hybrid;
-    if (!h) return Promise.resolve({ allow: true });
+    if (!h) return Promise.resolve({ noVerdict: true, note: "tab gone" });
     if (ev.top && ev.top !== h.url && /^https?:/.test(ev.top)) {
       try {
         if (Services.io.newURI(ev.top).prePath !== h.identityOrigin) {
@@ -427,8 +458,8 @@
       const req = nextProbe++;
       const timer = window.setTimeout(() => {
         probeWaiters.delete(req);
-        resolve({ allow: true });
-      }, 1000);
+        resolve({ noVerdict: true, note: "timed out" });
+      }, PROBE_TIMEOUT_MS);
       probeWaiters.set(req, r => {
         window.clearTimeout(timer);
         if (r.redirectBody !== undefined) r.redirectBody = window.btoa(r.redirectBody);
@@ -753,7 +784,11 @@
       if (!webProgress?.isTopLevel) return;
       const tab = gBrowser.getTabForBrowser(browser);
       const h = tab?._hybrid;
-      if (!h || location.spec === "about:blank") return;
+      if (!h) return;
+      if (location.spec === "about:blank") {
+        window.setTimeout(() => tab._hybrid === h && reapplyIdentity(tab), 0);
+        return;
+      }
       // Our own address mirroring of the placeholder: not a navigation.
       if ((flags & SAME_DOCUMENT) && location.spec === h.mirroredURL) return;
       if (location.spec === h.mirroredURL && Date.now() - (h.mirrorGuard || 0) < 3000) return;
@@ -1110,6 +1145,59 @@
       syncVisibility();
     }
   }).observe(urlbarEl, { attributes: true, attributeFilter: ["open"] });
+
+  // ------------------------------------------------------------ test hook --
+  // For tests/test_browser.py, driven through Marionette. Only present when
+  // the browser was started with HYBRID_TEST set; nothing else uses it.
+  if (env.get("HYBRID_TEST")) {
+    const tabIndex = tab => gBrowser.tabs.indexOf(tab);
+    const tabAt = i => (i === undefined || i === null ? gBrowser.selectedTab : gBrowser.tabs[i]);
+    window.HybridTest = {
+      isPrivate,
+      winId: () => winId,
+      switchEngine: (engine, url, index) => switchEngine(tabAt(index), engine, url),
+      openTab(url, engine) {
+        const tab = gBrowser.addTrustedTab(engine ? "about:blank" : url, { inBackground: false });
+        if (engine) switchEngine(tab, engine, url);
+        return tabIndex(tab);
+      },
+      selectTab(index) {
+        gBrowser.selectedTab = gBrowser.tabs[index];
+      },
+      tabs() {
+        return gBrowser.tabs.map(tab => {
+          const h = tab._hybrid;
+          let identity = null;
+          try {
+            identity = tab.linkedBrowser.contentPrincipal?.originNoSuffix ?? null;
+          } catch (e) {}
+          return {
+            index: tabIndex(tab),
+            selected: tab.selected,
+            engine: h ? h.engine : "gecko",
+            id: h?.id ?? null,
+            url: h ? h.url : tab.linkedBrowser.currentURI?.spec,
+            title: h ? h.title : tab.label,
+            loading: h ? h.loading : tab.hasAttribute("busy"),
+            dead: tab.hasAttribute("hybrid-dead"),
+            blocked: h?.blocked ?? 0,
+            identity,
+            identityOrigin: h?.identityOrigin ?? null,
+            reapplied: h?.reapplied ?? 0,
+          };
+        });
+      },
+      engineButton: () => ({
+        label: engineButton.getAttribute("label"),
+        failed: engineButton.hasAttribute("failed"),
+        tooltip: engineButton.getAttribute("tooltiptext"),
+      }),
+      host: () => HybridHost.debugState(),
+      setRule: (site, engine) => setRule(site, engine),
+      rules: () => getRules(),
+      probe: (url, type) => probe({ id: gBrowser.selectedTab._hybrid?.id, url, type }),
+    };
+  }
 
   window.addEventListener("resize", syncGeometry);
   window.setInterval(syncGeometry, 150);

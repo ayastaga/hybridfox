@@ -712,10 +712,27 @@ struct Verdict {
   std::string body, mime;
 };
 void ResolveCheckWith(int req, const Verdict& v, bool from_timeout);
-void ResolveCheck(int req, const std::string& reason, bool from_timeout) {
+
+// Firefox didn't answer in time (busy, hung, or the bridge broke). A page
+// load is allowed, so a stall can never make browsing impossible; a
+// subresource is blocked ("fail closed"), because allowing it would let
+// trackers and ads through whenever Firefox is slow. HYBRID_FAIL_OPEN=1
+// allows both, as earlier versions did.
+void CheckTimedOut(int req) {
+  auto it = g_checks.find(req);
+  if (it == g_checks.end()) return;
+  const bool allowed =
+      it->second.kind == "navigation" || std::getenv("HYBRID_FAIL_OPEN") != nullptr;
+  auto d = Event("check-timeout", it->second.tab);
+  d->SetString("url", it->second.url);
+  d->SetString("kind", it->second.kind);
+  d->SetBool("allowed", allowed);
+  Emit(d);
+  Log(std::string("privacy check timed out, ") + (allowed ? "allowed: " : "blocked: ") +
+      it->second.url);
   Verdict v;
-  v.reason = reason;
-  ResolveCheckWith(req, v, from_timeout);
+  if (!allowed) v.reason = "no verdict";
+  ResolveCheckWith(req, v, true);
 }
 
 void StartCheck(int browser_id, std::string url, std::string top,
@@ -765,8 +782,10 @@ void StartCheck(int browser_id, std::string url, std::string top,
   d->SetString("jar", jar);
   d->SetInt("type", type);
   Emit(d);
-  // Never hang a page on a missing answer: allow after a short wait.
-  CefPostDelayedTask(TID_UI, base::BindOnce(&ResolveCheck, req, std::string(), true), 1500);
+  // Never hang a page on a missing answer (see CheckTimedOut).
+  int timeout_ms = 1500;
+  if (const char* e = std::getenv("HYBRID_CHECK_TIMEOUT_MS")) timeout_ms = std::max(50, std::atoi(e));
+  CefPostDelayedTask(TID_UI, base::BindOnce(&CheckTimedOut, req), timeout_ms);
 }
 
 void ResolveCheckWith(int req, const Verdict& v, bool from_timeout) {
@@ -775,9 +794,10 @@ void ResolveCheckWith(int req, const Verdict& v, bool from_timeout) {
   PendingCheck pc = std::move(it->second);
   g_checks.erase(it);
   g_check_by_key.erase(pc.key);
-  if (from_timeout) {
-    Log("privacy check timed out, allowed: " + pc.url);
-  } else if (v.cache && v.redirect_url.empty() && !v.has_body) {
+  // Timeouts and "no verdict" answers are never cached: the next request
+  // asks again.
+  if (!from_timeout && v.cache && v.reason != "no verdict" && v.redirect_url.empty() &&
+      !v.has_body) {
     g_verdicts[pc.cache_key] = v.reason;
   }
   for (size_t i = 0; i < pc.callbacks.size(); i++) {

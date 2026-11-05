@@ -590,9 +590,20 @@ static void resolve_check(int req, const char *reason) {
   g_hash_table_remove(checks, GINT_TO_POINTER(req));
 }
 
+/* Firefox didn't answer in time. This host only checks page loads, and a
+   stalled check must never make browsing impossible, so the load goes ahead
+   (Chromium tabs do the same for page loads; see chromium_host.cc). */
 static gboolean check_timeout(gpointer req) {
-  if (g_hash_table_contains(checks, req)) {
-    log_msg("privacy check timed out, allowed");
+  Check *c = g_hash_table_lookup(checks, req);
+  if (c) {
+    JsonBuilder *b = event("check-timeout", c->tab);
+    add_str(b, "url", c->url);
+    add_str(b, "kind", "navigation");
+    add_bool(b, "allowed", TRUE);
+    emit(b);
+    char *msg = g_strdup_printf("privacy check timed out, allowed: %s", c->url);
+    log_msg(msg);
+    g_free(msg);
     resolve_check(GPOINTER_TO_INT(req), "");
   }
   return G_SOURCE_REMOVE;
@@ -672,7 +683,8 @@ static gboolean on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebK
   add_str(b, "top", "");
   add_str(b, "jar", t->jar);
   emit(b);
-  g_timeout_add(1500, check_timeout, GINT_TO_POINTER(req));
+  const char *ms = getenv("HYBRID_CHECK_TIMEOUT_MS");
+  g_timeout_add(ms ? MAX(50, atoi(ms)) : 1500, check_timeout, GINT_TO_POINTER(req));
   return TRUE;
 }
 

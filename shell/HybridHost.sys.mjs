@@ -281,6 +281,10 @@ function onEngineLine(engine, line) {
     case "classify":
       classify(engine, ev);
       return;
+    case "check-timeout":
+      // The engine gave up waiting for a verdict (see classify()).
+      log(`${engine.info.label}: no verdict in time for ${ev.kind}`, ev.url, ev.allowed ? "(allowed)" : "(blocked)");
+      break; // also delivered to the tab's window below
     case "private-ended":
     case "focused":
     case "unfocused":
@@ -332,28 +336,42 @@ const Bridge = {
 Bridge.active = Bridge.compute();
 setInterval(() => Bridge.refresh(), 3000);
 
+// When a check can't produce an answer, subresources are blocked ("fail
+// closed") so a broken check can't silently let trackers through; page loads
+// are allowed so browsing never becomes impossible. HYBRID_FAIL_OPEN=1 allows
+// both, as earlier versions did.
+const FAIL_OPEN = !!env.get("HYBRID_FAIL_OPEN");
+const NO_VERDICT = "no verdict";
+const noVerdictFor = ev => (ev.kind === "resource" && !FAIL_OPEN ? NO_VERDICT : "");
+
 async function classify(engine, ev) {
   let reason = "";
   let reply = {};
-  try {
-    reason = await HybridPrivacy.classify(ev);
-  } catch (e) {
-    log("privacy check failed", e);
-  }
   // Firefox's own verdicts depend only on the sites involved, so the engine
   // may reuse them; extension verdicts depend on the exact request.
   let cache = true;
+  try {
+    reason = await HybridPrivacy.classify(ev);
+  } catch (e) {
+    log("privacy check failed for", ev.url, e);
+    reason = noVerdictFor(ev);
+    cache = false;
+  }
   if (!reason && ev.kind === "resource" && Bridge.active && tabOwner.has(ev.id)) {
     cache = false;
     const owner = tabOwner.get(ev.id);
     const entry = windows.get(owner.winId);
     try {
       const r = await entry?.handler.probe(ev);
-      if (r?.block) reason = "extension";
-      else if (r?.redirectBody !== undefined) reply = { redirectBody: r.redirectBody, redirectMime: r.redirectMime || "" };
-      else if (r?.redirectURL) reply = { redirectURL: r.redirectURL };
+      if (!r || r.noVerdict) {
+        log("extension check gave no verdict for", ev.url, r?.note || "");
+        reason = noVerdictFor(ev);
+      } else if (r.block) reason = "extension";
+      else if (r.redirectBody !== undefined) reply = { redirectBody: r.redirectBody, redirectMime: r.redirectMime || "" };
+      else if (r.redirectURL) reply = { redirectURL: r.redirectURL };
     } catch (e) {
-      debug("extension probe failed", e);
+      log("extension check failed for", ev.url, e);
+      reason = noVerdictFor(ev);
     }
   }
   if (reason) debug("blocking", ev.kind, ev.url, `(${reason})`);
@@ -615,6 +633,25 @@ export const HybridHost = {
 
   send(engine, obj) {
     engines[engine]?.send(obj);
+  },
+
+  // A snapshot of the session, for tests and debugging.
+  debugState() {
+    return {
+      failOpen: FAIL_OPEN,
+      bridgeActive: Bridge.active,
+      windows: [...windows.entries()].map(([id, w]) => ({ id, isPrivate: !!w.isPrivate })),
+      tabs: [...tabOwner.entries()].map(([id, o]) => ({ id, ...o })),
+      engines: Object.fromEntries(Object.values(engines).map(e => [e.name, {
+        running: !!e.proc,
+        pid: e.proc?.pid ?? null,
+        ready: e.ready,
+        failure: e.failure,
+        attached: [...e.attached],
+        pending: e.pending.length,
+        jars: e.jars,
+      }])),
+    };
   },
 
   // Ask an engine for its latest cookies and wait until Firefox has them.
