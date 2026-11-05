@@ -54,7 +54,8 @@ built for your machine's processor (x86_64 or ARM64) and is about 400 MB.
 Remove it with `sudo apt remove hybrid-browser`.
 
 `./hybrid --debug` also prints every message between the two engines to the
-terminal. `./setup.sh --update` re-downloads the latest Firefox and CEF.
+terminal. `./setup.sh --update` moves the pinned versions in `versions.json` to the
+latest Firefox and CEF releases, downloads them and rebuilds.
 
 Your profile lives in `~/.local/share/hybrid-browser/`, separate from your
 normal Firefox and Chrome profiles.
