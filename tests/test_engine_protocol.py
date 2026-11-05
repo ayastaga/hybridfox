@@ -71,7 +71,6 @@ def test_sign_in_and_out_are_reported(engine, start_host, site):
     assert ev["jar"] == "normal"
 
 
-@pytest.mark.xfail(reason="needs cookies-dump and SameSite comparison (work item 2)", strict=True)
 def test_samesite_only_change_is_applied(engine, start_host):
     h = start_host(engine)
     h.send(cmd="cookies-replace", jar="normal", cookies=[ALICE])
@@ -87,6 +86,19 @@ def test_samesite_only_change_is_applied(engine, start_host):
         time.sleep(0.3)
     assert [c["sameSite"] for c in got] == ["strict"]
     assert got[0]["value"] == "alice" and got[0]["httpOnly"] is True
+
+
+def test_samesite_only_change_in_engine_is_reported(engine, start_host, site):
+    h = start_host(engine)
+    h.send(cmd="cookies-replace", jar="normal", cookies=[])
+    h.wait_event("cookies-ready", jar="normal")
+    h.create(1, site.url("/login?u=alice"))
+    h.wait(lambda e: e["event"] == "cookie-set" and e["name"] == "session", 10, "sign-in cookie")
+    h.mark()
+    # The site re-sets the same cookie, changing only SameSite.
+    h.send(cmd="navigate", id=1, url=site.url("/samesite?v=Strict"))
+    ev = h.wait(lambda e: e["event"] == "cookie-set" and e["name"] == "session", 10, "SameSite change")
+    assert ev["sameSite"] == "strict" and ev["value"] == "alice"
 
 
 def test_popup_keeps_opener_and_closes_itself(engine, start_host, parent, site):
@@ -110,7 +122,6 @@ def test_dialog_round_trip(engine, start_host, site):
     assert site.report("confirm") == "true"
 
 
-@pytest.mark.xfail(reason="needs cookies-dump and SameSite comparison (work item 2)", strict=True)
 def test_private_end_discards_private_profile(engine, start_host, site):
     h = start_host(engine)
     secret = {**ALICE, "value": "incognito"}
@@ -200,6 +211,42 @@ def test_fail_open_env_restores_old_behaviour(blink, start_host, site):
     res = h.wait_event("check-timeout", kind="resource")
     assert res["allowed"] is True
     site.wait_for(lambda e: e["path"] == "/pixel.svg", what="image loaded despite no verdict")
+
+
+def test_every_subresource_is_checked(blink, start_host, site):
+    """A page's first subresources can be requested before the frame reports
+    its new address; they used to skip the check entirely (~1 load in 10)."""
+    h = start_host(blink)
+    asked = []
+
+    def answer(ev):
+        if ev["kind"] == "resource":
+            asked.append(ev)
+        return {"cache": False}  # so every load asks again
+
+    h.on_classify = answer
+    h.create(1, site.url(f"/third-party?via={site.other}"))
+    for _ in range(9):
+        h.mark()
+        h.send(cmd="reload", id=1, skipCache=True)
+        h.wait_loaded(1)
+    assert len([e for e in asked if "pixel.svg" in e["url"]]) == 10
+    assert all(e["top"].startswith(site.base) for e in asked), asked
+
+
+def test_subresource_of_non_web_page_is_checked(blink, start_host, site, tmp_path):
+    """Pages that aren't http(s) (here a file:// page) used to skip the check.
+    (A data: page can't be used: Chromium's Private Network Access rules stop
+    it from loading anything from localhost at all.)"""
+    h = start_host(blink, {"HYBRID_CHECK_TIMEOUT_MS": "400"})
+    h.on_classify = lambda ev: None
+    page = tmp_path / "page.html"
+    page.write_text(f"<img src='http://{site.other}/pixel.svg'>")
+    h.create(1, page.as_uri(), wait_loaded=False)
+    res = h.wait_event("check-timeout", kind="resource")
+    assert res["allowed"] is False
+    time.sleep(0.5)
+    assert not page_views(site, "/pixel.svg")
 
 
 def test_substituted_body_is_served(blink, start_host, site):

@@ -147,3 +147,30 @@ def test_failed_probe_is_no_verdict(browser, site):
     # A URL no channel can be made for: the probe must not answer "allow".
     r = browser.m.js_async("HybridTest.probe('http://[::1', 4).then(resolve)")
     assert r.get("noVerdict") is True and not r.get("allow"), r
+
+
+# ----------------------------------------------------------------- cookies --
+
+ADD_COOKIE = """
+const [host, name, value, oa] = arguments;
+const ms = Date.now() + 3600 * 1000;  // Firefox 159 stores expiry in ms
+Services.cookies.add(host, '/', name, value, false, true, false, ms, oa,
+  Ci.nsICookie.SAMESITE_LAX, Ci.nsICookie.SCHEME_HTTP, false);
+"""
+
+
+def test_isolated_cookies_stay_in_firefox(browser, site):
+    """Container and partitioned cookies are deliberately not mirrored."""
+    browser.m.js(ADD_COOKIE, "127.0.0.1", "session", "container", {"userContextId": 1})
+    browser.m.js(ADD_COOKIE, "127.0.0.1", "session", "partitioned",
+                 {"partitionKey": "(http,example.org)"})
+    browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink", what="Blink page view")
+    assert view["user"] is None, view
+    # Control: the same cookie in Firefox's plain jar does reach the engine.
+    browser.m.js(ADD_COOKIE, "127.0.0.1", "session", "plain", {})
+    time.sleep(1)
+    site.reset()
+    browser.m.js("BrowserCommands.reload()")
+    view = site.wait_for(lambda e: e["path"] == "/" and e["engine"] == "blink", what="reloaded view")
+    assert view["user"] == "plain", view

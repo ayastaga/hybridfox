@@ -22,6 +22,13 @@ def _needs_display():
     if not os.environ.get("DISPLAY"):
         pytest.skip("no X display: run the tests under xvfb-run")
     os.makedirs(ARTIFACTS, exist_ok=True)
+    # An X server resets itself when its last client disconnects, which
+    # happens between tests; a test connecting during the reset gets
+    # "connection reset". One connection held for the whole run prevents it.
+    from Xlib import display
+    keeper = display.Display()
+    yield
+    keeper.close()
 
 
 @pytest.fixture(scope="session")

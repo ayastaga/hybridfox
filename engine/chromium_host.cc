@@ -241,9 +241,13 @@ std::string CookieUrl(const CookieRec& c) {
          (c.path.empty() ? "/" : c.path);
 }
 
+// Equal for mirroring purposes. SameSite counts: a site that tightens a
+// cookie to Strict (or loosens it) without changing its value must reach the
+// other engines too.
 bool SameCookie(const CookieRec& a, const CookieRec& b) {
   return a.value == b.value && a.secure == b.secure &&
          a.httponly == b.httponly && a.session == b.session &&
+         a.same_site == b.same_site &&
          (a.session || std::fabs(a.expires - b.expires) < 120);
 }
 
@@ -307,6 +311,37 @@ class CookieCollector : public CefCookieVisitor {
   Jar* jar_;
   std::map<std::string, CookieRec> cookies_;
   IMPLEMENT_REFCOUNTING(CookieCollector);
+};
+
+// Debugging and tests: reads a jar's cookies straight from Chromium's store
+// (not from what the mirroring believes) and emits them as one "cookies"
+// event.
+class CookieDumper : public CefCookieVisitor {
+ public:
+  explicit CookieDumper(std::string jar) : jar_(std::move(jar)), list_(CefListValue::Create()) {}
+  bool Visit(const CefCookie& c, int, int, bool&) override {
+    auto d = CefDictionaryValue::Create();
+    d->SetString("domain", CefString(&c.domain));
+    d->SetString("path", CefString(&c.path));
+    d->SetString("name", CefString(&c.name));
+    d->SetString("value", CefString(&c.value));
+    d->SetString("sameSite", SameSiteName(c.same_site));
+    d->SetBool("httpOnly", c.httponly);
+    list_->SetDictionary(list_->GetSize(), d);
+    return true;
+  }
+  ~CookieDumper() override {
+    // Released when the visit completes, including when there were none.
+    auto d = CefDictionaryValue::Create();
+    d->SetString("event", "cookies");
+    d->SetString("jar", jar_);
+    d->SetList("cookies", list_);
+    Emit(d);
+  }
+ private:
+  std::string jar_;
+  CefRefPtr<CefListValue> list_;
+  IMPLEMENT_REFCOUNTING(CookieDumper);
 };
 
 struct Jar {
@@ -680,6 +715,24 @@ int g_next_check = 1;
 // (including same-site ones) is checked, and verdicts are per request.
 std::atomic<bool> g_check_all{false};
 
+// The page each browser is loading, recorded when its main-frame request
+// starts (and on redirects). A page's first subresource requests can arrive
+// before the frame reports its new address, and without this they would be
+// classified against no page at all. IO thread writes, IO thread reads.
+std::mutex g_nav_mutex;
+std::map<int, std::string> g_nav_url;  // CEF browser id -> main-frame URL
+
+void SetNavUrl(int browser_id, const std::string& url) {
+  std::lock_guard<std::mutex> lock(g_nav_mutex);
+  g_nav_url[browser_id] = url;
+}
+
+std::string NavUrl(int browser_id) {
+  std::lock_guard<std::mutex> lock(g_nav_mutex);
+  auto it = g_nav_url.find(browser_id);
+  return it == g_nav_url.end() ? "" : it->second;
+}
+
 // Responses an extension substituted (e.g. uBlock Origin's harmless stand-in
 // scripts), served for that one request. Filled on the UI thread, consumed on
 // the IO thread.
@@ -848,16 +901,21 @@ class HostClient : public CefClient,
                                    CefRefPtr<CefFrame> frame,
                                    CefRefPtr<CefRequest> request,
                                    CefRefPtr<CefCallback> callback) override {
-    if (std::getenv("HYBRID_NO_PROTECTION")) return RV_CONTINUE;
+    if (std::getenv("HYBRID_NO_PROTECTION") || !browser) return RV_CONTINUE;
     const std::string url = request->GetURL().ToString();
-    if (!IsWeb(url) || !browser) return RV_CONTINUE;
     const bool nav = request->GetResourceType() == RT_MAIN_FRAME;
+    if (nav) SetNavUrl(browser->GetIdentifier(), url);  // even for data: pages
+    if (!IsWeb(url)) return RV_CONTINUE;
     std::string top;
     if (!nav) {
       CefRefPtr<CefFrame> main = browser->GetMainFrame();
       top = main ? main->GetURL().ToString() : "";
-      if (!IsWeb(top)) return RV_CONTINUE;
-      if (!g_check_all && HostOf(top) == HostOf(url)) return RV_CONTINUE;
+      // Not committed yet: use the page being loaded. If even that isn't a
+      // web page (data:, about:blank), the request is still checked, with
+      // no top page; it is never let through unchecked.
+      if (!IsWeb(top)) top = NavUrl(browser->GetIdentifier());
+      if (!IsWeb(top)) top.clear();
+      if (!g_check_all && !top.empty() && HostOf(top) == HostOf(url)) return RV_CONTINUE;
     }
     CefPostTask(TID_UI, base::BindOnce(&StartCheck, browser->GetIdentifier(),
                                        url, top,
@@ -865,6 +923,14 @@ class HostClient : public CefClient,
                                        (int)request->GetResourceType(), request,
                                        callback));
     return RV_CONTINUE_ASYNC;
+  }
+
+  // IO thread: a redirected page load changes the page being loaded.
+  void OnResourceRedirect(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
+                          CefRefPtr<CefRequest> request, CefRefPtr<CefResponse>,
+                          CefString& new_url) override {
+    if (browser && request->GetResourceType() == RT_MAIN_FRAME)
+      SetNavUrl(browser->GetIdentifier(), new_url.ToString());
   }
 
   // IO thread: serve a response an extension substituted for this request.
@@ -980,6 +1046,10 @@ class HostClient : public CefClient,
   void OnBeforeClose(CefRefPtr<CefBrowser> b) override {
     int id = TabIdFor(b);
     g_browser_to_tab.erase(b->GetIdentifier());
+    {
+      std::lock_guard<std::mutex> lock(g_nav_mutex);
+      g_nav_url.erase(b->GetIdentifier());
+    }
     auto it = g_tabs.find(id);
     if (it != g_tabs.end()) {
       if (it->second.container) {
@@ -1194,6 +1264,17 @@ void HandleLine(const std::string& line) {
     Jar* jar = GetJar(JarName(c));
     jar->flush_reqs.push_back(c->GetInt("req"));
     jar->StartPoll();
+    return;
+  }
+  if (cmd == "cookies-dump") {
+    Jar* jar = GetJar(JarName(c));
+    if (jar->retired || !jar->Manager()->VisitAllCookies(new CookieDumper(jar->name))) {
+      // No store (or nothing to visit): report an empty jar.
+      auto d = Event("cookies");
+      d->SetString("jar", jar->name);
+      d->SetList("cookies", CefListValue::Create());
+      Emit(d);
+    }
     return;
   }
   if (cmd == "private-end") {

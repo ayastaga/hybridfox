@@ -169,6 +169,10 @@ after a restart.
   differences (CEF has no change notification). Switching a tab from Chromium
   to Gecko syncs first, so the page reloads already signed in. Each side
   ignores changes it just received, so nothing bounces back and forth.
+- **What "the same cookie" means.** A cookie is mirrored again whenever
+  its value, Secure, HttpOnly, session/expiry or SameSite attribute
+  changes, so a site that only tightens a cookie to `SameSite=Strict` is
+  seen by every engine.
 - **Popups.** A popup opened by a Chromium page stays a real Chromium popup,
   so it can still talk to the page that opened it (sign-in popups depend on
   this), and it appears as a new tab. When it closes itself, its tab closes.
@@ -176,6 +180,29 @@ after a restart.
   host watches mouse clicks. A click on a Chromium view gives it the
   keyboard, and a click anywhere else hands it back to Firefox through GTK's
   focus window.
+
+### Cookies that stay in Firefox
+
+Firefox keeps some cookies apart on purpose, and the engines have only one
+plain jar per profile ("normal" or "private"), with no way to keep them
+apart. Mirroring them would undo the isolation, so they stay in Gecko:
+
+- **Container tabs** (Multi-Account Containers, `userContextId`): each
+  container is a separate identity. Mirroring would merge every container
+  into one engine jar, so a site would see your work and personal accounts
+  as the same person.
+- **Partitioned third-party cookies** (Total Cookie Protection, CHIPS;
+  `partitionKey`): a tracker's cookie set under `news.example` is stored
+  separately from the same tracker's cookie under `shop.example`, so it
+  can't follow you between sites. The engines' jars aren't partitioned by
+  top-level site, so a mirrored copy would be readable everywhere.
+- **First-party isolation** (`privacy.firstparty.isolate`,
+  `firstPartyDomain`): the older form of the same idea, with the same
+  problem.
+
+The cost: a sign-in that lives only in a container, or a third-party
+embed's partitioned cookie, isn't carried into engine tabs. Sign-ins made
+in normal (and private) tabs are.
 
 ## Testing the engine on its own
 
@@ -224,8 +251,9 @@ in Firefox.
 - Only cookies are shared. Site storage (localStorage, sessionStorage,
   IndexedDB) is still separate per engine, so a site that keeps its login
   token there may sign you in again silently or ask once.
-- Container tabs and partitioned third-party cookies are not shared with
-  Chromium.
+- Container tabs, partitioned third-party cookies and first-party-isolated
+  cookies are deliberately not shared with the other engines; see
+  [Cookies that stay in Firefox](#cookies-that-stay-in-firefox).
 - Extensions that work inside pages (password-manager autofill, Dark Reader,
   userscripts, uBlock Origin's element hiding) don't reach engine tabs yet;
   only request filtering does.
