@@ -78,3 +78,24 @@ def start_host(request, parent, site):
     yield start
     for h in hosts:
         h.quit()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """On a failure, save what the (virtual) screen showed, for CI artifacts."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when != "call" or not report.failed:
+        return
+    try:
+        from PIL import Image
+        from Xlib import X, display
+        d = display.Display()
+        root = d.screen().root
+        geo = root.get_geometry()
+        raw = root.get_image(0, 0, geo.width, geo.height, X.ZPixmap, 0xFFFFFFFF).data
+        Image.frombytes("RGB", (geo.width, geo.height), raw, "raw", "BGRX").save(
+            os.path.join(ARTIFACTS, item.name.replace("/", "_") + ".png"))
+        d.close()
+    except Exception as e:  # a missing screenshot must not hide the failure
+        print("screenshot failed:", e)

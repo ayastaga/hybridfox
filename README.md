@@ -1,5 +1,7 @@
 # Hybrid browser prototype
 
+[![CI](https://github.com/ayastaga/hybridfox/actions/workflows/ci.yml/badge.svg)](https://github.com/ayastaga/hybridfox/actions/workflows/ci.yml)
+
 One browser window, three engines. Every tab runs on Firefox's engine (Gecko)
 by default, and any tab can switch to Chromium's engine (Blink) or WebKit and
 back, inside the same window and tab strip, keeping your sign-ins.
