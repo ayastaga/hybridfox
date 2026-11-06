@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hybrid browser prototype: one-time setup.
+# HybridFox: one-time setup.
 #
 #   ./setup.sh            download the pinned CEF + Firefox, build the engine hosts
 #   ./setup.sh --update   move the pins in versions.json to the latest releases,
@@ -103,5 +103,5 @@ install -Dm644 "$ROOT/shell/hybrid.cfg" "$TP/firefox/hybrid.cfg"
 # `./setup.sh --update` instead.
 install -Dm644 "$ROOT/shell/policies.json" "$TP/firefox/distribution/policies.json"
 
-chmod +x "$ROOT/hybrid"
-say "Done. Start the browser with: $ROOT/hybrid"
+chmod +x "$ROOT/hybridfox"
+say "Done. Start the browser with: $ROOT/hybridfox"

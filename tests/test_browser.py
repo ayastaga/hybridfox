@@ -1,4 +1,4 @@
-"""The real browser (./hybrid), driven through Marionette in the chrome context.
+"""The real browser (./hybridfox), driven through Marionette in the chrome context.
 
 Each test launches HybridFox with a fresh, temporary profile (XDG_DATA_HOME),
 HYBRID_TEST=1 (which installs window.HybridTest, see hybrid-browser.js) and
@@ -7,100 +7,12 @@ state and the test site's request log.
 """
 import os
 import signal
-import subprocess
 import time
 
 import pytest
 
-from conftest import ARTIFACTS, free_port
+from browserlib import FIREFOX, Browser
 from hostlib import HOSTS, ROOT
-from marionette import Marionette
-
-FIREFOX = os.path.join(ROOT, "third_party/firefox/firefox")
-PROFILE_DIRNAME = "hybrid-browser"
-
-PREFS = """
-user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("browser.aboutwelcome.enabled", false);
-user_pref("browser.startup.homepage_override.mstone", "ignore");
-user_pref("browser.startup.page", 0);
-user_pref("startup.homepage_welcome_url", "");
-user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
-user_pref("datareporting.policy.firstRunURL", "");
-user_pref("browser.tabs.warnOnClose", false);
-user_pref("devtools.console.stdout.chrome", true);
-user_pref("browser.dom.window.dump.enabled", true);
-user_pref("marionette.port", {port});
-"""
-
-
-class Browser:
-    def __init__(self, tmp_path, name, env=None):
-        self.data = tmp_path / "data"
-        profile = self.data / PROFILE_DIRNAME / "firefox-profile"
-        profile.mkdir(parents=True)
-        port = free_port()
-        (profile / "user.js").write_text(PREFS.replace("{port}", str(port)))
-        self.log_path = os.path.join(ARTIFACTS, f"{name}-browser.log")
-        self.log = open(self.log_path, "w")
-        self.proc = subprocess.Popen(
-            [os.path.join(ROOT, "hybrid"), "--marionette", "about:blank"],
-            env={
-                **os.environ,
-                "XDG_DATA_HOME": str(self.data),
-                "HYBRID_TEST": "1",
-                # Firefox only lets Marionette into the chrome context with this.
-                "MOZ_REMOTE_ALLOW_SYSTEM_ACCESS": "1",
-                "HYBRID_DEBUG": "1",
-                "HYBRID_NO_SANDBOX": "1",
-                "HYBRID_CHROMIUM_FLAGS": os.environ.get("HYBRID_CHROMIUM_FLAGS", "--disable-gpu"),
-                **(env or {}),
-            },
-            stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True,
-        )
-        self.m = Marionette(port)
-        self.m.start()
-        self.m.wait("return !!window.HybridTest", what="the hybrid layer to load")
-
-    # Shorthands for window.HybridTest
-    def tabs(self):
-        return self.m.js("return HybridTest.tabs()")
-
-    def tab(self, index):
-        return self.tabs()[index]
-
-    def host(self):
-        return self.m.js("return HybridTest.host()")
-
-    def wait_tab(self, index, pred, timeout=30, what="tab state"):
-        deadline = time.time() + timeout
-        last = None
-        while time.time() < deadline:
-            tabs = self.tabs()
-            last = tabs[index] if index < len(tabs) else None
-            if last and pred(last):
-                return last
-            time.sleep(0.25)
-        raise AssertionError(f"timed out waiting for {what}; tab {index}: {last}")
-
-    def log_text(self):
-        self.log.flush()
-        with open(self.log_path) as f:
-            return f.read()
-
-    def quit(self):
-        try:
-            self.m.js("Services.startup.quit(Ci.nsIAppStartup.eForceQuit)")
-        except Exception:
-            pass
-        try:
-            self.proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            # Only this test's process group: never match by name.
-            os.killpg(self.proc.pid, signal.SIGKILL)
-            self.proc.wait()
-        self.log.close()
-
 
 @pytest.fixture
 def browser(request, tmp_path, site):
@@ -392,3 +304,89 @@ def test_ublock_origin_filters_blink_tab(browser, site):
     # the engine served a body uBlock Origin substituted, not the real file.
     ads = [b for b in t["blockedLog"] if "adsbygoogle.js" in b["url"]]
     assert ads and ads[0]["reason"] == "replaced by an extension", t["blockedLog"]
+
+
+# ------------------------------------------------------------------- naming --
+
+def test_old_profile_folder_is_migrated(tmp_path, site):
+    """Earlier versions kept the profile in hybrid-browser/; the launcher
+    moves it to hybridfox/ before Firefox starts."""
+    from browserlib import Browser as B
+    b = B(tmp_path, "test_old_profile_folder_is_migrated", profile_dirname="hybrid-browser")
+    try:
+        assert (b.data / "hybridfox" / "firefox-profile" / "user.js").exists()
+        assert not (b.data / "hybrid-browser").exists()
+        assert "moved your profile" in b.log_text()
+    finally:
+        b.quit()
+
+
+# ------------------------------------------- Firefox's protections in engines --
+# Firefox ships local test lists ("moztest-*") with these entries, so no
+# network is needed for the verdicts.
+
+def test_safe_browsing_sends_unsafe_page_to_gecko(browser, site):
+    # Marionette's "recommended preferences" turn Safe Browsing off in any
+    # browser it drives; HybridFox follows Firefox's settings, so turn it on.
+    browser.m.js("""for (const n of ['phishing', 'malware'])
+                      Services.prefs.setBoolPref(`browser.safebrowsing.${n}.enabled`, true);""")
+    i = browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/"))
+    browser.wait_tab(i, lambda t: t["engine"] == "blink" and not t["loading"], what="Blink tab")
+    browser.m.js("HybridTest.navigate(arguments[0], 'http://itisatrap.org/firefox/its-a-trap.html')", i)
+    # Firefox's own warning page explains the danger, so the tab moves to Gecko.
+    t = browser.wait_tab(i, lambda t: t["engine"] == "gecko", what="tab moved to Gecko")
+    assert "its-a-trap" in (t["url"] or "") or "phishing" in (t["url"] or "")
+    assert "Safe Browsing blocked" in browser.log_text()
+
+
+def test_tracking_protection_blocks_trackers_in_blink(browser, site):
+    browser.m.js("Services.prefs.setBoolPref('privacy.trackingprotection.enabled', true)")
+    i = browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/tracker-test"))
+    t = browser.wait_tab(i, lambda t: any("itisatracker.org" in b["url"] for b in t["blockedLog"]),
+                         what="test tracker blocked")
+    hit = next(b for b in t["blockedLog"] if "itisatracker.org" in b["url"])
+    assert hit["reason"] == "tracking", hit
+    assert not any("example.org" in b["url"] for b in t["blockedLog"])  # not a tracker
+    assert browser.m.js("return HybridTest.engineButton().label").startswith("Blink · ")
+
+
+# ----------------------------------------------------------------- browser UI --
+
+def test_refusal_bar_offers_chromium(browser, site):
+    i = browser.m.js("return HybridTest.openTab(arguments[0])", site.url("/unsupported"))
+    browser.m.wait("""const b = gBrowser.tabs[arguments[0]].linkedBrowser;
+                      return !!gBrowser.getNotificationBox(b).getNotificationWithValue('hybrid-compat')""", i,
+                   what="'may not support Firefox' bar")
+
+
+def test_engine_zoom_uses_firefox_steps(browser, site):
+    i = browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/red"))
+    browser.wait_tab(i, lambda t: t["engine"] == "blink" and not t["loading"], what="Blink tab")
+    browser.m.js("FullZoom.enlarge()")
+    assert browser.m.js("return HybridTest.engineButton().label") == "Blink 110%"
+    browser.m.js("FullZoom.reset()")
+    assert browser.m.js("return HybridTest.engineButton().label") == "Blink"
+
+
+def test_engine_visits_go_to_firefox_history(browser, site):
+    url = site.url("/red")
+    browser.m.js("return HybridTest.openTab(arguments[0], 'blink')", url)
+    browser.m.wait("""const [url] = arguments;
+                      window._h = window._h || {};
+                      PlacesUtils.history.fetch(url).then(v => { window._h[url] = !!v; });
+                      return window._h[url]""", url, what="visit in Firefox's history")
+
+
+def test_no_chromium_profile_left_on_disk(tmp_path, site):
+    """Chromium's working folder lives in $XDG_RUNTIME_DIR and is deleted on exit."""
+    from browserlib import Browser as B
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    b = B(tmp_path, "test_no_chromium_profile_left_on_disk", env={"XDG_RUNTIME_DIR": str(runtime)})
+    try:
+        b.m.js("return HybridTest.openTab(arguments[0], 'blink')", site.url("/login?u=alice"))
+        site.wait_for(lambda e: e["engine"] == "blink" and e["user"] == "alice")
+        assert [p.name for p in runtime.iterdir() if p.name.startswith("hybrid-chromium-")]
+    finally:
+        b.quit()
+    assert not [p.name for p in runtime.iterdir() if p.name.startswith("hybrid-chromium-")]

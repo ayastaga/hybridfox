@@ -1,4 +1,4 @@
-/* webkit_host: the WebKit engine of the hybrid browser (WebKitGTK).
+/* webkit_host: the WebKit engine of HybridFox (WebKitGTK).
  *
  * Speaks the same line protocol as chromium_host: JSON commands on stdin,
  * "@@"-prefixed JSON events on stdout. Each WebKit "tab" is a WebKitWebView

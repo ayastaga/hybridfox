@@ -13,3 +13,6 @@ __pycache__/
 # Test output (logs, screenshots)
 tests/artifacts/
 .pytest_cache/
+
+# Editor settings
+.vscode/

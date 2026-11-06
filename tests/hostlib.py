@@ -240,7 +240,7 @@ class Site:
             for entry in self.log():
                 if pred(entry):
                     return entry
-            time.sleep(0.2)
+            time.sleep(0.02)  # fine-grained: scripts/bench.py times with this
         raise AssertionError(f"timed out waiting for {what}; site log: {self.log()[-10:]}")
 
     def report(self, key, timeout=20):

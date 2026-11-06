@@ -1,4 +1,4 @@
-/* Hybrid browser layer, loaded into every Firefox browser window (normal and
+/* HybridFox layer, loaded into every Firefox browser window (normal and
  * private) by hybrid.cfg.
  *
  * Each tab runs on one engine: Gecko (Firefox's own), Blink (Chromium) or
@@ -90,6 +90,7 @@
           h.blockedLog = [];
         }
         if (!ev.loading) recordHistory(h);
+        if (!ev.loading && h.loading) h.loads++;
         h.loading = ev.loading;
         h.canGoBack = ev.canGoBack;
         h.canGoForward = ev.canGoForward;
@@ -237,7 +238,7 @@
     return {
       engine, id, url, title, visible,
       loading: true, canGoBack: false, canGoForward: false,
-      dialogs: 0, zoom: 1, blocked: 0, blockedLog: [],
+      dialogs: 0, zoom: 1, blocked: 0, blockedLog: [], loads: 0,
     };
   }
 
@@ -1212,6 +1213,7 @@
             dead: tab.hasAttribute("hybrid-dead"),
             blocked: h?.blocked ?? 0,
             blockedLog: h?.blockedLog ?? [],
+            loads: h?.loads ?? null, // finished page loads in this engine
             identity,
             identityOrigin: h?.identityOrigin ?? null,
             reapplied: h?.reapplied ?? 0,

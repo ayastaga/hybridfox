@@ -26,7 +26,7 @@ def test_no_report_error():
 def test_no_self_matching_pkill():
     """pgrep -f / pkill -f with a pattern from your own command line kills
     the calling shell."""
-    scripts = files(".sh") + [n for n in ("hybrid",) if os.path.exists(os.path.join(ROOT, n))]
+    scripts = files(".sh") + [n for n in ("hybridfox",) if os.path.exists(os.path.join(ROOT, n))]
     for name in scripts:
         with open(os.path.join(ROOT, name)) as f:
             assert not re.search(r"\b(pgrep|pkill)\b[^\n]*\s-f\b", f.read()), name
