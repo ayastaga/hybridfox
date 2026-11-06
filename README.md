@@ -1,4 +1,4 @@
-# Hybrid browser prototype
+# HybridFox
 
 [![CI](https://github.com/ayastaga/hybridfox/actions/workflows/ci.yml/badge.svg)](https://github.com/ayastaga/hybridfox/actions/workflows/ci.yml)
 
@@ -6,61 +6,87 @@ One browser window, three engines. Every tab runs on Firefox's engine (Gecko)
 by default, and any tab can switch to Chromium's engine (Blink) or WebKit and
 back, inside the same window and tab strip, keeping your sign-ins.
 
-This is a rough prototype: real engines, hacky glue. It runs an unmodified,
+This is a prototype: real engines, hand-made glue. It runs an unmodified,
 official Firefox build, Chromium 156 through CEF (the Chromium Embedded
 Framework) and WebKit through WebKitGTK. Nothing is compiled from Firefox's,
-Chromium's or WebKit's source.
+Chromium's or WebKit's source. The exact builds are pinned, with checksums,
+in [`versions.json`](versions.json).
+
+What the claims below rest on: each names the automated tests that check it
+(in [`tests/`](tests/), run in CI and under `xvfb-run`), or says it is
+untested. See [What's tested](#whats-tested) for the full list, and
+[docs/benchmarks.md](docs/benchmarks.md) for measured costs.
+
+![One tab through Gecko, Blink and WebKit, signed in throughout](docs/screenshots/demo.gif)
+
+| Gecko | Blink | WebKit |
+| --- | --- | --- |
+| ![The test site in a Gecko tab](docs/screenshots/engine-gecko.png) | ![The same tab in Blink, still signed in](docs/screenshots/engine-blink.png) | ![The same tab in WebKit, still signed in](docs/screenshots/engine-webkit.png) |
+
+| uBlock Origin in a Blink tab | A private window |
+| --- | --- |
+| ![uBlock Origin's stand-in served to a Blink tab; the engine button counts 3 blocked requests](docs/screenshots/ublock-blink.png) | ![A Blink tab in a private window, not signed in](docs/screenshots/private-window.png) |
+
+These come from a scripted run under Xvfb
+([`scripts/screenshots.py`](scripts/screenshots.py)); the striped address
+bar is Firefox's sign that a script is driving it.
 
 ## Requirements
 
-The WebKit engine is optional; setup builds it when WebKitGTK's development
-files are present (`sudo apt install libwebkit2gtk-4.1-dev libjson-glib-dev`
-on Debian and Ubuntu) and tells you how to add them otherwise.
-
-
-- x86_64 or ARM64 (aarch64) Linux, any desktop. On Wayland (GNOME, KDE) it runs through XWayland,
-  which those desktops start automatically.
+- x86_64 or ARM64 (aarch64) Linux, any desktop. On Wayland (GNOME, KDE) it
+  runs through XWayland, which those desktops start automatically.
 - About 4 GB of disk.
 - Build tools: `curl xz bzip2 python3 cmake g++ make` and the X11 headers.
+- Optional, for the WebKit engine: WebKitGTK's development files. Setup
+  builds the WebKit engine when they're present and says how to add them
+  otherwise.
 
 ```bash
 # Debian/Ubuntu
 sudo apt install curl xz-utils bzip2 python3 cmake g++ make libx11-dev
+sudo apt install libwebkit2gtk-4.1-dev libjson-glib-dev libsoup-3.0-dev pkg-config  # WebKit
 # Fedora
 sudo dnf install curl xz bzip2 python3 cmake gcc-c++ make libX11-devel
 # Arch
 sudo pacman -S --needed curl xz bzip2 python cmake gcc make libx11
 ```
 
+Tested on Ubuntu 26.04 (aarch64) and, in CI, Ubuntu 24.04 (x86_64). Fedora
+and Arch package names are given but those systems are untested.
+
 ## Build and run
 
 ```bash
-chmod +x setup.sh   # make the setup script executable
-./setup.sh          # downloads CEF + Firefox, builds the engine host (~10 min)
-./hybrid            # starts the browser
+./setup.sh          # downloads the pinned Firefox + CEF, builds the engines (~10 min)
+./hybridfox         # starts the browser
 ```
+
+`./hybridfox --debug` also prints every message between Firefox and the
+engines to the terminal. `./setup.sh --update` moves the pins in
+`versions.json` to the latest Firefox and CEF releases, downloads and checks
+them, and rebuilds.
+
+Your profile lives in `~/.local/share/hybridfox/`, separate from your normal
+Firefox and Chrome profiles. (Earlier versions, called "Hybrid Browser", used
+`~/.local/share/hybrid-browser/`; the launcher moves it the first time.
+Test: `test_old_profile_folder_is_migrated`.)
 
 ### Installing as a .deb (Debian, Ubuntu)
 
 After `./setup.sh`, you can package your build and install it like any app:
 
 ```bash
-./make-deb.sh
-sudo apt install ./hybrid-browser_*.deb
-hybrid-browser
+./make-deb.sh                     # maintainer: $MAINTAINER, or your git name and email
+sudo apt install ./hybridfox_*.deb
+hybridfox
 ```
 
-The package installs to `/opt/hybrid-browser`, adds a *Hybrid Browser* entry
-to your app menu and turns on Chromium's sandbox during installation. It's
-built for your machine's processor (x86_64 or ARM64) and is about 400 MB.
-Remove it with `sudo apt remove hybrid-browser`.
-
-`./hybrid --debug` also prints every message between the two engines to the
-terminal. `./setup.sh --update` moves the pinned versions in `versions.json` to the
-latest Firefox and CEF releases, downloads them and rebuilds.
-
-Your profile lives in `~/.local/share/hybrid-browser/`, separate from your
-normal Firefox and Chrome profiles.
+The package installs to `/opt/hybridfox`, adds a *HybridFox* entry to your
+app menu and turns on Chromium's sandbox during installation. It's built for
+your machine's processor and is about 400 MB. Remove it with
+`sudo apt remove hybridfox`. It bundles an official, Firefox-branded build,
+so it is for your own machines: read
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before sharing it.
 
 ### Chromium's sandbox
 
@@ -73,6 +99,9 @@ sudo chown root:root engine/build/out/chrome-sandbox
 sudo chmod 4755 engine/build/out/chrome-sandbox
 ```
 
+The automated tests run without the sandbox (`HYBRID_NO_SANDBOX=1`): CI
+runners restrict user namespaces too.
+
 ## Using it
 
 - **Switch the current tab's engine:** click the engine button next to the
@@ -84,56 +113,99 @@ sudo chmod 4755 engine/build/out/chrome-sandbox
   Link in New Blink Tab* or *Open Link in New WebKit Tab*.
 - Blink tabs have a blue underline in the tab strip, WebKit tabs a purple one.
 
+Switching itself is tested (`test_one_tab_through_three_engines_stays_signed_in`);
+the menus, context-menu items and the Ctrl+Alt+E shortcut are not.
+
 **You stay signed in across engines.** All engines share one cookie jar:
 sign in on any engine and the others are signed in too, even tabs that are
-already open, and signing out works the same way. Sign-in popups, and alert, confirm and prompt dialogs,
-also work in Chromium tabs (the dialogs appear as Firefox's own prompts).
+already open, and signing out works the same way.
+*Tests:* `test_one_tab_through_three_engines_stays_signed_in`,
+`test_webkit_sign_in_reaches_new_blink_tab`,
+`test_live_sign_out_relays_from_blink_to_webkit`,
+`test_samesite_only_change_*`, `test_engine_cookie_expiry_units`.
 
-**Every window, including private windows.** Chromium tabs work in all
-windows. In a private window they use a separate in-memory Chromium profile
-that shares sign-ins only with that private session and is discarded,
-together with Firefox's private data, when the last private window closes.
-Nothing from a private Chromium tab is written to disk.
+**Popups and dialogs.** Sign-in popups keep their connection to the page
+that opened them, and alert, confirm and prompt dialogs work in engine tabs
+(they appear as Firefox's own prompts).
+*Tests:* `test_popup_keeps_opener_and_closes_itself`, `test_dialog_round_trip`
+(engine side, both engines). Untested: the Firefox prompt itself.
+
+**Every window, including private windows.** Engine tabs work in all
+windows. In a private window they use a separate in-memory profile that
+shares sign-ins only with that private session and is discarded, together
+with Firefox's private data, when the last private window closes.
+*Tests:* `test_private_window_isolation_and_discard`,
+`test_private_end_discards_private_profile`.
 
 **Your Firefox extensions filter Chromium tabs' requests.** Extensions that
-block or rewrite requests, such as uBlock Origin, Privacy Badger or ClearURLs,
-decide every request a Chromium tab makes, with their own lists and your
-settings: blocked requests are cancelled, and stand-ins an extension
-substitutes (uBlock Origin's harmless replacement scripts) are served to the
-page. This works because the blank Gecko page under each Chromium tab takes on
-the site's identity and asks for each request from there, so extensions see
-an ordinary Firefox request; nothing is downloaded twice.
+block or redirect requests decide the requests a Chromium tab's pages make,
+with their own lists and your settings: blocked requests are cancelled, and
+stand-ins an extension substitutes (uBlock Origin's harmless replacement
+scripts) are served to the page. This works because the blank Gecko page
+under each Chromium tab takes on the site's identity and asks for each
+request from there, so extensions see an ordinary Firefox request; nothing
+is downloaded twice. What is and isn't covered, measured with uBlock Origin,
+ClearURLs and Privacy Badger, is in
+[docs/extension-bridge.md](docs/extension-bridge.md).
+*Tests:* `test_ublock_origin_filters_blink_tab`,
+`test_placeholder_takes_site_identity`, `test_substituted_body_is_served`,
+`test_redirect_verdict_is_followed`. WebKit tabs aren't filtered by
+extensions (see Known limits).
 
 **Firefox's protections apply to Chromium tabs.** Before a Chromium tab
 loads a page, Firefox checks it with Safe Browsing; a phishing or malware
 page opens in Gecko instead, showing Firefox's own warning. Third-party
 requests from Chromium pages are checked against Firefox's Enhanced Tracking
-Protection lists, following your protection level (Standard, Strict, Custom),
-its private-window setting and your per-site exceptions. The engine button
-shows how many requests were blocked ("Blink · 3 blocked").
+Protection lists, following your protection level, its private-window
+setting and your per-site exceptions. The engine button shows how many
+requests were blocked ("Blink · 3 blocked"). If Firefox doesn't answer a
+check within 1.5 s, the request is blocked ("fail closed"), except page
+loads, which go ahead so a stall can't stop browsing; `HYBRID_FAIL_OPEN=1`
+allows both.
+*Tests:* `test_safe_browsing_sends_unsafe_page_to_gecko`,
+`test_tracking_protection_blocks_trackers_in_blink`,
+`test_resource_without_verdict_is_blocked`, `test_no_verdict_is_never_cached`,
+`test_fail_open_env_restores_old_behaviour`,
+`test_every_subresource_is_checked`,
+`test_subresource_of_non_web_page_is_checked`. Untested: protection levels
+other than the tracking-protection pref, private-window settings and
+per-site exceptions.
 
 **No Chromium traces on disk.** Chromium's working folder lives in a
 temporary folder in memory (`$XDG_RUNTIME_DIR`) and is deleted when the
 browser closes. Sign-ins come from Firefox's cookie jar, and pages you visit
-in Chromium tabs are recorded in Firefox's history (except in private
+in engine tabs are recorded in Firefox's history (except in private
 windows). Set `HYBRID_CHROMIUM_PERSIST=1` to keep a Chromium profile instead.
+*Tests:* `test_no_chromium_profile_left_on_disk`,
+`test_engine_visits_go_to_firefox_history`.
 
-**Per-site rules.** Right-click a tab and choose *Always Open example.com in
-Chromium*; visits to that site then open with Chromium's engine. When a page
-in a Gecko tab says it doesn't support your browser, a bar offers to open it
-in Chromium, once or always. Rules can't be created from private windows,
+**Per-site rules.** Right-click a tab and choose *Always Open example.com
+with…*; visits to that site then open with that engine. When a page in a
+Gecko tab says it doesn't support your browser, a bar offers to open it in
+Chromium, once or always. Rules can't be created from private windows,
 since that would record a site you visited privately.
+*Tests:* `test_site_rule_opens_site_in_its_engine`,
+`test_refusal_bar_offers_chromium`, `test_private_window_isolation_and_discard`.
 
-**Same size as Gecko tabs.** Chromium renders at exactly Firefox's scale on
-HiDPI and scaled screens, and Ctrl+Plus, Ctrl+Minus and Ctrl+0 zoom
-Chromium pages using Firefox's zoom steps (the engine button shows the
-level, e.g. "Blink 120%").
+**Crash recovery.** If an engine's process crashes, it is restarted and its
+tabs reopen where they were, still signed in. After 3 crashes in 2 minutes
+it is left stopped, and the engine button says so ("Blink · stopped").
+*Tests:* `test_engine_crash_reopens_tabs`,
+`test_engine_gives_up_after_three_crashes`.
 
-Inside a Chromium tab, the address bar, bookmarks, search, back, forward and
-reload (including F5 and Ctrl+R) all act on the Chromium page. Ctrl+T, Ctrl+W, Ctrl+L, Ctrl+N,
-Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+PageUp/PageDown, Ctrl+Shift+T and F6 work
-while a Chromium page has the keyboard. Chromium tabs reopen as Chromium tabs
-after a restart.
+**Same size as Gecko tabs.** Engines render at Firefox's scale, and
+Ctrl+Plus, Ctrl+Minus and Ctrl+0 zoom engine pages using Firefox's zoom
+steps (the engine button shows the level, e.g. "Blink 110%").
+*Tests:* `test_engine_zoom_uses_firefox_steps`,
+`test_zoom_resizes_red_square`. Untested: HiDPI and fractional scales (the
+tests run at scale 1).
+
+Inside an engine tab, the address bar, bookmarks, search, back, forward and
+reload (including F5 and Ctrl+R) act on the engine's page. Ctrl+T, Ctrl+W,
+Ctrl+L, Ctrl+N, Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+PageUp/PageDown, Ctrl+Shift+T
+and F6 work while an engine page has the keyboard. Engine tabs reopen in
+their engine after a restart. *Untested* (only keyboard focus handover is:
+`test_unfocus_hands_keyboard_to_focus_proxy`).
 
 ## How it works
 
@@ -183,6 +255,11 @@ after a restart.
   host watches mouse clicks. A click on a Chromium view gives it the
   keyboard, and a click anywhere else hands it back to Firefox through GTK's
   focus window.
+- **WebKit** (`engine/webkit_host.c`) speaks the same protocol, with a
+  WebKitGTK web view in a GtkPlug per tab.
+- **Crashes.** HybridHost tells an engine exit it asked for (quitting) from
+  a crash, restarts a crashed engine and has each window reopen that
+  engine's tabs with the same ids.
 
 ### Cookies that stay in Firefox
 
@@ -223,7 +300,7 @@ xvfb-run -a -s "-screen 0 1280x1024x24" python3 -m pytest -v tests/
   window with Firefox's non-default visual), synthetic clicks (XTEST) and
   pixels read back from the X server.
 - `tests/test_browser.py` drives the real browser through Marionette
-  (Firefox's remote-control protocol). It starts `./hybrid` with a
+  (Firefox's remote-control protocol). It starts `./hybridfox` with a
   temporary profile and `HYBRID_TEST=1`, which adds a small
   `window.HybridTest` hook for the tests.
 - `tests/test_deps.py` checks the pinned downloads offline;
@@ -238,17 +315,45 @@ To try sign-ins by hand:
 
 ```bash
 python3 tests/signin_site.py &      # http://127.0.0.1:8765
-./hybrid http://127.0.0.1:8765/
+./hybridfox http://127.0.0.1:8765/
 ```
 
 `tests/chromium-only-test.html` shows features that work in Chromium but
 not in Firefox.
 
+## What's tested
+
+Every run of the suite (CI on each push, Ubuntu 24.04 x86_64; and Ubuntu
+26.04 aarch64 under `xvfb-run`) covers:
+
+- **Each engine host on its own** (`tests/test_engine_protocol.py`, Blink
+  and WebKit): attaching to a window with Firefox's non-default visual,
+  rendering, zoom, cookies in and out (including SameSite-only changes),
+  popups that keep `window.opener`, dialogs, private-profile discard, focus
+  handover, clean exit; for Blink also fail-closed checks, substituted and
+  redirected responses, and that every subresource is checked.
+- **The whole browser** (`tests/test_browser.py`, through Marionette):
+  sign-ins across all three engines and between open tabs, private
+  windows, site rules, the refusal bar, crash recovery, Safe Browsing and
+  tracking protection in Blink tabs, uBlock Origin filtering a Blink tab,
+  history, zoom, the placeholder page's identity, profile migration, and
+  that no Chromium folder is left on disk.
+- **Downloads** (`tests/test_deps.py`): checksums enforced, pins respected.
+- **Past mistakes** (`tests/test_repo.py`), such as the engine's library
+  search path.
+
+Not tested automatically: HiDPI and fractional scaling, Wayland/XWayland
+on a real desktop, a window manager (the tests run without one), keyboard
+shortcuts inside engine tabs, the engine menus and context menus, session
+restore, dragging tabs between windows, Firefox's prompt for engine
+dialogs, the `.deb` package, Chromium's sandbox, WebKit crash recovery,
+and Fedora or Arch.
+
 ## Troubleshooting
 
 - **"No X11 display found":** on Wayland, XWayland must be enabled.
 - **The Chromium view is offset from the content area:** set
-  `HYBRID_OFFSET_X` / `HYBRID_OFFSET_Y` (device pixels) before `./hybrid`.
+  `HYBRID_OFFSET_X` / `HYBRID_OFFSET_Y` (device pixels) before `./hybridfox`.
   Please report your desktop and scaling setting.
 - **Blurry on a HiDPI or fractionally scaled screen:** both engines run on X11,
   so the desktop's XWayland scaling applies. On KDE, set *Legacy applications
@@ -258,9 +363,9 @@ not in Firefox.
   software rendering. Give the VM a GPU (in UTM: Display → the card marked
   "GPU Supported"), or try forcing plain software mode, which avoids GPU
   process crashes:
-  `HYBRID_CHROMIUM_FLAGS="--disable-gpu" ./hybrid`. Any Chromium switches can
+  `HYBRID_CHROMIUM_FLAGS="--disable-gpu" ./hybridfox`. Any Chromium switches can
   be passed this way.
-- **Nothing happens when switching engines:** run `./hybrid --debug` and look
+- **Nothing happens when switching engines:** run `./hybridfox --debug` and look
   for lines starting with `[hybrid]`.
 
 ## Known limits
@@ -273,7 +378,11 @@ not in Firefox.
   [Cookies that stay in Firefox](#cookies-that-stay-in-firefox).
 - Extensions that work inside pages (password-manager autofill, Dark Reader,
   userscripts, uBlock Origin's element hiding) don't reach engine tabs yet;
-  only request filtering does.
+  only request filtering does, and not all of it: header changes (Privacy
+  Badger's DNT and Global Privacy Control signals), WebSockets and
+  extensions that track tabs by their page loads (Privacy Badger's
+  blocking) aren't bridged. Measured in
+  [docs/extension-bridge.md](docs/extension-bridge.md).
 - An extension's own toolbar popup (for example uBlock Origin's per-site
   switch and its counter) sees a blank page for engine tabs, because Firefox
   doesn't let the placeholder take on the page's address.
@@ -299,12 +408,20 @@ not in Firefox.
   Chromium tabs yet. Downloads and file pickers use Chromium's defaults.
 - Firefox self-updates are disabled for this install. Use
   `./setup.sh --update` instead.
-- ARM64 builds use the same code but haven't been tested yet.
+- A cookie set inside an engine reaches Firefox (and the other engines)
+  after up to about a second: CEF has no cookie-change notification, so the
+  host polls (see [docs/benchmarks.md](docs/benchmarks.md)). Switching
+  engines doesn't wait for the poll.
+- On ARM64, a Chromium renderer process that is thrown away after a
+  cancelled page load (for example one Safe Browsing stopped) aborts with
+  "stack smashing detected" in the terminal output. It happens inside
+  Chromium's renderer, which runs none of HybridFox's code, and no test
+  has seen an effect on the browser. Not investigated further.
 
 ## Layout
 
 ```
-hybrid              launcher
+hybridfox           launcher
 setup.sh            downloads, build, install
 make-deb.sh         package a finished build as a .deb
 shell/
@@ -318,18 +435,22 @@ engine/
   chromium_host.cc  the Chromium engine host
   webkit_host.c     the WebKit engine host (built when WebKitGTK is installed)
   CMakeLists.txt
-  test_host.py      older standalone engine smoke test (superseded by tests/)
 scripts/
   deps.py           pinned downloads (fetch, update, fetch-test-addons)
+  bench.py          benchmarks (docs/benchmarks.md)
+  bridge_matrix.py  extension coverage in Gecko vs Blink (docs/extension-bridge.md)
+docs/               benchmarks, extension-bridge report, screenshots
 versions.json       the pinned Firefox, CEF and test add-on builds, with checksums
 tests/
   test_engine_protocol.py  engine hosts through their line protocol
   test_browser.py   the real browser through Marionette
   test_deps.py, test_repo.py  downloads, and checks for past mistakes
-  hostlib.py, marionette.py, conftest.py  test helpers
+  hostlib.py, browserlib.py, marionette.py, conftest.py  test helpers
   signin_site.py    local sign-in site that records each request
   chromium-only-test.html  page that works in Chromium but not Firefox
-third_party/        CEF and Firefox (created by setup.sh)
+third_party/        Firefox, CEF and test add-ons (created by scripts/deps.py)
+LICENSE             MPL-2.0
+THIRD_PARTY_NOTICES.md  licences and trademarks of what HybridFox uses
 ```
 
 ## Next steps
