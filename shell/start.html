@@ -1,0 +1,41 @@
+<!doctype html>
+<!-- The page an engine tab opens on when the tab showed one of Firefox's own
+     pages (new tab, home), which other engines can't display. -->
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>New tab</title>
+<style>
+  :root { --fg: #15141a; --muted: #5b5b66; --bg: #f9f9fb; --chip: #e0e0e6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #fbfbfe; --muted: #a8a8b3; --bg: #1c1b22; --chip: #2b2a33; }
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; place-items: center; background: var(--bg); color: var(--fg);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Cantarell, sans-serif;
+  }
+  main { text-align: center; padding: 24px; }
+  .engine {
+    display: inline-block; padding: 4px 12px; border-radius: 6px; font-weight: 600;
+    color: #fff; background: #1f9ec4; letter-spacing: .02em;
+  }
+  .engine.webkit { background: #8e44ad; }
+  h1 { font-size: 22px; font-weight: 600; margin: 18px 0 6px; }
+  p { margin: 0; color: var(--muted); }
+  kbd { background: var(--chip); border-radius: 4px; padding: 1px 6px; font: inherit; font-size: 14px; }
+</style>
+<main>
+  <span class="engine" id="engine">Blink</span>
+  <h1 id="title">New tab</h1>
+  <p>Type an address or a search in the address bar (<kbd>Ctrl</kbd>+<kbd>L</kbd>).</p>
+  <p>Firefox's own pages, like this tab's home page, open only in Gecko.</p>
+</main>
+<script>
+  const engine = new URLSearchParams(location.search).get("engine") === "webkit" ? "webkit" : "blink";
+  const label = engine === "webkit" ? "WebKit" : "Blink";
+  const badge = document.getElementById("engine");
+  badge.textContent = label;
+  badge.className = "engine " + engine;
+  document.title = "New " + label + " tab";
+  document.getElementById("title").textContent = "New " + label + " tab";
+</script>
