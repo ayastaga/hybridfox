@@ -1,0 +1,102 @@
+{
+ "none/gecko": {
+  "ad_script_standin": "false",
+  "doubleclick": "loaded",
+  "subresource_query": "utm_source=newsletter&utm_medium=email&id=7",
+  "navigation_query": "utm_source=newsletter&id=7",
+  "dnt": null,
+  "gpc": null,
+  "websocket_reached_server": true,
+  "websocket_checks": 0
+ },
+ "none/blink": {
+  "ad_script_standin": "false",
+  "doubleclick": "loaded",
+  "blink_blocked_log": [],
+  "subresource_query": "utm_source=newsletter&utm_medium=email&id=7",
+  "navigation_query": "utm_source=newsletter&id=7",
+  "dnt": null,
+  "gpc": null,
+  "websocket_reached_server": true,
+  "websocket_checks": 0
+ },
+ "ublock-origin/gecko": {
+  "ad_script_standin": "true",
+  "doubleclick": "blocked",
+  "subresource_query": "utm_source=newsletter&utm_medium=email&id=7",
+  "navigation_query": "utm_source=newsletter&id=7",
+  "dnt": null,
+  "gpc": null,
+  "websocket_reached_server": true,
+  "websocket_checks": 0
+ },
+ "ublock-origin/blink": {
+  "ad_script_standin": "true",
+  "doubleclick": "blocked",
+  "blink_blocked_log": [
+   {
+    "url": "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+    "kind": "resource",
+    "reason": "replaced by an extension"
+   },
+   {
+    "url": "https://ad.doubleclick.net/ddm/ad/N1234.example/B5678;sz=300x250",
+    "kind": "resource",
+    "reason": "extension"
+   },
+   {
+    "url": "https://ad.doubleclick.net/ddm/ad/N1234.example/B5678;sz=300x250",
+    "kind": "resource",
+    "reason": "extension"
+   }
+  ],
+  "subresource_query": "utm_source=newsletter&utm_medium=email&id=7",
+  "navigation_query": "utm_source=newsletter&id=7",
+  "dnt": null,
+  "gpc": null,
+  "websocket_reached_server": true,
+  "websocket_checks": 0
+ },
+ "clearurls/gecko": {
+  "ad_script_standin": "false",
+  "doubleclick": "loaded",
+  "subresource_query": "id=7",
+  "navigation_query": "id=7",
+  "dnt": null,
+  "gpc": null,
+  "websocket_reached_server": true,
+  "websocket_checks": 0
+ },
+ "clearurls/blink": {
+  "ad_script_standin": "false",
+  "doubleclick": "loaded",
+  "blink_blocked_log": [],
+  "subresource_query": "id=7",
+  "navigation_query": "utm_source=newsletter&id=7",
+  "dnt": null,
+  "gpc": null,
+  "websocket_reached_server": true,
+  "websocket_checks": 0
+ },
+ "privacy-badger/gecko": {
+  "ad_script_standin": "false",
+  "doubleclick": "blocked",
+  "subresource_query": "utm_source=newsletter&utm_medium=email&id=7",
+  "navigation_query": "utm_source=newsletter&id=7",
+  "dnt": "1",
+  "gpc": "1",
+  "websocket_reached_server": true,
+  "websocket_checks": 0
+ },
+ "privacy-badger/blink": {
+  "ad_script_standin": "false",
+  "doubleclick": "loaded",
+  "blink_blocked_log": [],
+  "subresource_query": "utm_source=newsletter&utm_medium=email&id=7",
+  "navigation_query": "utm_source=newsletter&id=7",
+  "dnt": null,
+  "gpc": null,
+  "websocket_reached_server": true,
+  "websocket_checks": 0
+ }
+}

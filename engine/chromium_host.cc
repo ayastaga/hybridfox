@@ -1,4 +1,4 @@
-// chromium_host: the Chromium engine of the hybrid browser.
+// chromium_host: the Chromium engine of HybridFox.
 //
 // Firefox (the shell) spawns one of these per browser session and talks to
 // it with one JSON object per line on stdin. Events go back on stdout,
@@ -1434,10 +1434,17 @@ void StdinThread() {
 
 // ------------------------------------------------------------------ app --
 
+// Space-separated switches; double quotes keep a value with spaces together,
+// e.g. --host-resolver-rules="MAP *.test 127.0.0.1".
 void AppendFlags(CefRefPtr<CefCommandLine> command_line, const std::string& all) {
   std::string tok;
+  bool quoted = false;
   for (size_t i = 0; i <= all.size(); i++) {
-    if (i == all.size() || all[i] == ' ') {
+    if (i < all.size() && all[i] == '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (i == all.size() || (all[i] == ' ' && !quoted)) {
       if (tok.rfind("--", 0) == 0) {
         std::string sw = tok.substr(2);
         size_t eq = sw.find('=');

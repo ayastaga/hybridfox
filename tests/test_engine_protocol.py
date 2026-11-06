@@ -324,3 +324,11 @@ def test_unsafe_page_is_reported(blink, start_host, site):
     assert ev["reason"] == "phishing"
     time.sleep(0.5)
     assert not page_views(site, "/red")
+
+
+def test_chromium_flags_keep_quoted_values(blink, start_host, site):
+    """HYBRID_CHROMIUM_FLAGS: double quotes keep a value with spaces together."""
+    h = start_host(blink, {"HYBRID_CHROMIUM_FLAGS": '--disable-gpu --host-resolver-rules="MAP *.test 127.0.0.1"'})
+    h.create(1, f"http://fixtures.test:{site.port}/")
+    view = site.wait_for(lambda e: e["path"] == "/", what="page via the resolver rule")
+    assert view["host"] == f"fixtures.test:{site.port}"

@@ -404,7 +404,13 @@ const FAIL_OPEN = !!env.get("HYBRID_FAIL_OPEN");
 const NO_VERDICT = "no verdict";
 const noVerdictFor = ev => (ev.kind === "resource" && !FAIL_OPEN ? NO_VERDICT : "");
 
+// What engines asked about, by engine/kind/scheme (debugState, docs).
+const classifyStats = {};
+
 async function classify(engine, ev) {
+  const scheme = /^([a-z]+):/i.exec(ev.url || "")?.[1] || "?";
+  const statKey = `${engine.name}/${ev.kind}/${scheme}`;
+  classifyStats[statKey] = (classifyStats[statKey] || 0) + 1;
   let reason = "";
   let reply = {};
   // Firefox's own verdicts depend only on the sites involved, so the engine
@@ -705,6 +711,7 @@ export const HybridHost = {
   debugState() {
     return {
       failOpen: FAIL_OPEN,
+      classified: { ...classifyStats },
       bridgeActive: Bridge.active,
       windows: [...windows.entries()].map(([id, w]) => ({ id, isPrivate: !!w.isPrivate })),
       tabs: [...tabOwner.entries()].map(([id, o]) => ({ id, ...o })),
