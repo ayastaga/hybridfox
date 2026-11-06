@@ -1,4 +1,4 @@
-/* Hybrid browser layer, loaded into every Firefox browser window (normal and
+/* HybridFox layer, loaded into every Firefox browser window (normal and
  * private) by hybrid.cfg.
  *
  * Each tab runs on one engine: Gecko (Firefox's own), Blink (Chromium) or
@@ -69,6 +69,9 @@
       case "blocked":
         if (!h) break;
         h.blocked++;
+        // The last few, for debugging and tests.
+        h.blockedLog.push({ url: ev.url, kind: ev.kind, reason: ev.reason });
+        if (h.blockedLog.length > 50) h.blockedLog.shift();
         debug("blocked", ev.reason, ev.url);
         if (tab.selected) updateChrome();
         break;
@@ -82,8 +85,12 @@
         break;
       case "loading":
         if (!h) break;
-        if (ev.loading && !h.loading) h.blocked = 0;
+        if (ev.loading && !h.loading) {
+          h.blocked = 0;
+          h.blockedLog = [];
+        }
         if (!ev.loading) recordHistory(h);
+        if (!ev.loading && h.loading) h.loads++;
         h.loading = ev.loading;
         h.canGoBack = ev.canGoBack;
         h.canGoForward = ev.canGoForward;
@@ -126,6 +133,27 @@
     for (const tab of tabsById.values()) {
       if (tab._hybrid.engine === engine) tab.setAttribute("hybrid-dead", "true");
     }
+    updateChrome();
+  }
+
+  // The engine's process crashed and HybridHost is starting a new one.
+  // Reopen this window's tabs on it where they were, with the same tab
+  // ids, so nothing else needs to know. Page state (form input, scroll
+  // position) is lost, as after a reload.
+  function onEngineRestart(engine) {
+    for (const tab of tabsById.values()) {
+      const h = tab._hybrid;
+      if (h.engine !== engine) continue;
+      log(`reopening ${LABEL[engine]} tab`, h.id, "at", h.url);
+      h.loading = true;
+      h.dialogs = 0;
+      h.visible = tab.selected && !overlayOpen;
+      h.rect = contentRect();
+      send(engine, { cmd: "create", id: h.id, win: winId, jar: JAR, url: h.url, visible: h.visible, ...h.rect });
+      if (h.zoom !== 1) send(engine, { cmd: "zoom", id: h.id, level: Math.log(h.zoom) / Math.log(1.2) });
+      if (tab.selected) send(engine, { cmd: "focus", id: h.id });
+    }
+    HybridHost.use(engine, winId);
     updateChrome();
   }
 
@@ -210,7 +238,7 @@
     return {
       engine, id, url, title, visible,
       loading: true, canGoBack: false, canGoForward: false,
-      dialogs: 0, zoom: 1, blocked: 0,
+      dialogs: 0, zoom: 1, blocked: 0, blockedLog: [], loads: 0,
     };
   }
 
@@ -226,6 +254,7 @@
 
   function engineLabel(h) {
     let label = LABEL[h.engine];
+    if (engineFailures[h.engine]) return `${label} · stopped`;
     if (h.zoom !== 1) label += ` ${Math.round(h.zoom * 100)}%`;
     if (h.blocked) label += ` · ${h.blocked} blocked`;
     return label;
@@ -309,7 +338,7 @@
         // allowed requests then stop at "not cached" without any network.
         ch.loadFlags |= Ci.nsIRequest.LOAD_FROM_CACHE | Ci.nsICachingChannel.LOAD_ONLY_FROM_CACHE;
       } catch (e) {
-        reply({ allow: true, note: "no channel: " + e });
+        reply({ noVerdict: true, note: "no channel: " + e });
         return;
       }
       let finalURL = "";
@@ -336,7 +365,7 @@
           },
         });
       } catch (e) {
-        reply({ allow: true, note: "open failed: " + e });
+        reply({ noVerdict: true, note: "open failed: " + e });
       }
     });`;
 
@@ -408,12 +437,43 @@
     browser.messageManager.sendAsyncMessage("hybrid:address", { url: h.url });
   }
 
+  // The placeholder's own about:blank load, started when the tab switched
+  // engines, can finish after the identity above was applied and replace
+  // that document with a plain one; extension checks would then run without
+  // the site's identity. So when the placeholder reports about:blank, apply
+  // the identity again unless it's already in place. The document
+  // createAboutBlankDocumentViewer makes carries the identity itself, so
+  // re-applying can't loop; the cap is a second guard.
+  const MAX_REAPPLY = 3;
+  function identityInPlace(tab) {
+    try {
+      return tab.linkedBrowser.contentPrincipal?.originNoSuffix === tab._hybrid.identityOrigin;
+    } catch (e) {
+      return false;
+    }
+  }
+  function reapplyIdentity(tab) {
+    const h = tab._hybrid;
+    if (!h?.identityOrigin || identityInPlace(tab)) return;
+    h.reapplied = (h.reapplied || 0) + 1;
+    if (h.reapplied > MAX_REAPPLY) {
+      debug("placeholder identity keeps getting replaced; giving up for", h.identityOrigin);
+      return;
+    }
+    debug("placeholder lost its identity; re-applying", h.identityOrigin);
+    h.identityOrigin = null;
+    mirrorIdentity(tab);
+  }
+
   // Asked by HybridHost for each engine request while request-filtering
-  // extensions are installed.
+  // extensions are installed. Anything short of an answer from the
+  // extensions (tab gone, no channel, no reply in time) is "no verdict",
+  // which HybridHost turns into a block for subresources.
+  const PROBE_TIMEOUT_MS = 1000;
   function probe(ev) {
     const tab = tabsById.get(ev.id);
     const h = tab?._hybrid;
-    if (!h) return Promise.resolve({ allow: true });
+    if (!h) return Promise.resolve({ noVerdict: true, note: "tab gone" });
     if (ev.top && ev.top !== h.url && /^https?:/.test(ev.top)) {
       try {
         if (Services.io.newURI(ev.top).prePath !== h.identityOrigin) {
@@ -427,8 +487,8 @@
       const req = nextProbe++;
       const timer = window.setTimeout(() => {
         probeWaiters.delete(req);
-        resolve({ allow: true });
-      }, 1000);
+        resolve({ noVerdict: true, note: "timed out" });
+      }, PROBE_TIMEOUT_MS);
       probeWaiters.set(req, r => {
         window.clearTimeout(timer);
         if (r.redirectBody !== undefined) r.redirectBody = window.btoa(r.redirectBody);
@@ -641,7 +701,9 @@
     engineButton.toggleAttribute("failed", !!(h && engineFailures[h.engine]));
     engineButton.setAttribute(
       "tooltiptext",
-      h
+      h && engineFailures[h.engine]
+        ? engineFailures[h.engine]
+        : h
         ? `This tab runs on the ${MENU_LABEL[h.engine]}, with Firefox’s tracking protection and Safe Browsing` +
             (h.blocked ? ` (${h.blocked} blocked on this page)` : "") + ". Click to choose an engine (Ctrl+Alt+E cycles)."
         : "This tab runs on Firefox’s engine. Click to choose an engine (Ctrl+Alt+E cycles)."
@@ -753,7 +815,11 @@
       if (!webProgress?.isTopLevel) return;
       const tab = gBrowser.getTabForBrowser(browser);
       const h = tab?._hybrid;
-      if (!h || location.spec === "about:blank") return;
+      if (!h) return;
+      if (location.spec === "about:blank") {
+        window.setTimeout(() => tab._hybrid === h && reapplyIdentity(tab), 0);
+        return;
+      }
       // Our own address mirroring of the placeholder: not a navigation.
       if ((flags & SAME_DOCUMENT) && location.spec === h.mirroredURL) return;
       if (location.spec === h.mirroredURL && Date.now() - (h.mirrorGuard || 0) < 3000) return;
@@ -1111,13 +1177,79 @@
     }
   }).observe(urlbarEl, { attributes: true, attributeFilter: ["open"] });
 
+  // ------------------------------------------------------------ test hook --
+  // For tests/test_browser.py, driven through Marionette. Only present when
+  // the browser was started with HYBRID_TEST set; nothing else uses it.
+  if (env.get("HYBRID_TEST")) {
+    const tabIndex = tab => gBrowser.tabs.indexOf(tab);
+    const tabAt = i => (i === undefined || i === null ? gBrowser.selectedTab : gBrowser.tabs[i]);
+    window.HybridTest = {
+      isPrivate,
+      winId: () => winId,
+      switchEngine: (engine, url, index) => switchEngine(tabAt(index), engine, url),
+      openTab(url, engine) {
+        const tab = gBrowser.addTrustedTab(engine ? "about:blank" : url, { inBackground: false });
+        if (engine) switchEngine(tab, engine, url);
+        return tabIndex(tab);
+      },
+      selectTab(index) {
+        gBrowser.selectedTab = gBrowser.tabs[index];
+      },
+      tabs() {
+        return gBrowser.tabs.map(tab => {
+          const h = tab._hybrid;
+          let identity = null;
+          try {
+            identity = tab.linkedBrowser.contentPrincipal?.originNoSuffix ?? null;
+          } catch (e) {}
+          return {
+            index: tabIndex(tab),
+            selected: tab.selected,
+            engine: h ? h.engine : "gecko",
+            id: h?.id ?? null,
+            url: h ? h.url : tab.linkedBrowser.currentURI?.spec,
+            title: h ? h.title : tab.label,
+            loading: h ? h.loading : tab.hasAttribute("busy"),
+            dead: tab.hasAttribute("hybrid-dead"),
+            blocked: h?.blocked ?? 0,
+            blockedLog: h?.blockedLog ?? [],
+            loads: h?.loads ?? null, // finished page loads in this engine
+            identity,
+            identityOrigin: h?.identityOrigin ?? null,
+            reapplied: h?.reapplied ?? 0,
+          };
+        });
+      },
+      engineButton: () => ({
+        label: engineButton.getAttribute("label"),
+        failed: engineButton.hasAttribute("failed"),
+        tooltip: engineButton.getAttribute("tooltiptext"),
+      }),
+      host: () => HybridHost.debugState(),
+      // Navigate or reload a tab as the address bar and reload button do.
+      navigate(index, url) {
+        const tab = tabAt(index);
+        if (tab._hybrid) redirect(tab, url);
+        else geckoLoad(tab.linkedBrowser, url);
+      },
+      reload(index) {
+        const tab = tabAt(index);
+        if (tab._hybrid) send(tab._hybrid.engine, { cmd: "reload", id: tab._hybrid.id });
+        else tab.linkedBrowser.reload();
+      },
+      setRule: (site, engine) => setRule(site, engine),
+      rules: () => getRules(),
+      probe: (url, type) => probe({ id: gBrowser.selectedTab._hybrid?.id, url, type }),
+    };
+  }
+
   window.addEventListener("resize", syncGeometry);
   window.setInterval(syncGeometry, 150);
   window.addEventListener("unload", () => HybridHost.unregisterWindow(winId));
 
   winId = HybridHost.registerWindow(
     window,
-    { onEvent: onHostEvent, onEngineFail, probe },
+    { onEvent: onHostEvent, onEngineFail, onEngineRestart, probe },
     isPrivate
   );
   updateChrome();

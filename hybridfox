@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# Start the hybrid browser (Firefox's engine + Chromium's engine, one window).
-#   ./hybrid [--debug] [firefox arguments...]
+# Start HybridFox (Firefox with Chromium's and WebKit's engines, one window).
+#   ./hybridfox [--debug] [firefox arguments...]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 FF="$ROOT/third_party/firefox/firefox"
 HOST="$ROOT/engine/build/out/chromium-host"
-DATA="${XDG_DATA_HOME:-$HOME/.local/share}/hybrid-browser"
 
-warn() { printf '\033[1;33mhybrid:\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[1;33mhybridfox:\033[0m %s\n' "$*" >&2; }
+
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/hybridfox"
+# Earlier versions were called "Hybrid Browser" and kept the profile in
+# hybrid-browser/. Move it once, so sign-ins, history and settings carry over.
+OLD_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/hybrid-browser"
+if [[ -d "$OLD_DATA" && ! -e "$DATA" ]]; then
+  mv "$OLD_DATA" "$DATA"
+  warn "moved your profile from $OLD_DATA to $DATA"
+fi
 
 if [[ ! -x "$FF" || ! -x "$HOST" ]]; then
   echo "The browser isn't built yet. Run: $ROOT/setup.sh" >&2

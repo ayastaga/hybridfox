@@ -1,4 +1,4 @@
-// chromium_host: the Chromium engine of the hybrid browser.
+// chromium_host: the Chromium engine of HybridFox.
 //
 // Firefox (the shell) spawns one of these per browser session and talks to
 // it with one JSON object per line on stdin. Events go back on stdout,
@@ -241,9 +241,13 @@ std::string CookieUrl(const CookieRec& c) {
          (c.path.empty() ? "/" : c.path);
 }
 
+// Equal for mirroring purposes. SameSite counts: a site that tightens a
+// cookie to Strict (or loosens it) without changing its value must reach the
+// other engines too.
 bool SameCookie(const CookieRec& a, const CookieRec& b) {
   return a.value == b.value && a.secure == b.secure &&
          a.httponly == b.httponly && a.session == b.session &&
+         a.same_site == b.same_site &&
          (a.session || std::fabs(a.expires - b.expires) < 120);
 }
 
@@ -307,6 +311,37 @@ class CookieCollector : public CefCookieVisitor {
   Jar* jar_;
   std::map<std::string, CookieRec> cookies_;
   IMPLEMENT_REFCOUNTING(CookieCollector);
+};
+
+// Debugging and tests: reads a jar's cookies straight from Chromium's store
+// (not from what the mirroring believes) and emits them as one "cookies"
+// event.
+class CookieDumper : public CefCookieVisitor {
+ public:
+  explicit CookieDumper(std::string jar) : jar_(std::move(jar)), list_(CefListValue::Create()) {}
+  bool Visit(const CefCookie& c, int, int, bool&) override {
+    auto d = CefDictionaryValue::Create();
+    d->SetString("domain", CefString(&c.domain));
+    d->SetString("path", CefString(&c.path));
+    d->SetString("name", CefString(&c.name));
+    d->SetString("value", CefString(&c.value));
+    d->SetString("sameSite", SameSiteName(c.same_site));
+    d->SetBool("httpOnly", c.httponly);
+    list_->SetDictionary(list_->GetSize(), d);
+    return true;
+  }
+  ~CookieDumper() override {
+    // Released when the visit completes, including when there were none.
+    auto d = CefDictionaryValue::Create();
+    d->SetString("event", "cookies");
+    d->SetString("jar", jar_);
+    d->SetList("cookies", list_);
+    Emit(d);
+  }
+ private:
+  std::string jar_;
+  CefRefPtr<CefListValue> list_;
+  IMPLEMENT_REFCOUNTING(CookieDumper);
 };
 
 struct Jar {
@@ -680,6 +715,24 @@ int g_next_check = 1;
 // (including same-site ones) is checked, and verdicts are per request.
 std::atomic<bool> g_check_all{false};
 
+// The page each browser is loading, recorded when its main-frame request
+// starts (and on redirects). A page's first subresource requests can arrive
+// before the frame reports its new address, and without this they would be
+// classified against no page at all. IO thread writes, IO thread reads.
+std::mutex g_nav_mutex;
+std::map<int, std::string> g_nav_url;  // CEF browser id -> main-frame URL
+
+void SetNavUrl(int browser_id, const std::string& url) {
+  std::lock_guard<std::mutex> lock(g_nav_mutex);
+  g_nav_url[browser_id] = url;
+}
+
+std::string NavUrl(int browser_id) {
+  std::lock_guard<std::mutex> lock(g_nav_mutex);
+  auto it = g_nav_url.find(browser_id);
+  return it == g_nav_url.end() ? "" : it->second;
+}
+
 // Responses an extension substituted (e.g. uBlock Origin's harmless stand-in
 // scripts), served for that one request. Filled on the UI thread, consumed on
 // the IO thread.
@@ -712,10 +765,27 @@ struct Verdict {
   std::string body, mime;
 };
 void ResolveCheckWith(int req, const Verdict& v, bool from_timeout);
-void ResolveCheck(int req, const std::string& reason, bool from_timeout) {
+
+// Firefox didn't answer in time (busy, hung, or the bridge broke). A page
+// load is allowed, so a stall can never make browsing impossible; a
+// subresource is blocked ("fail closed"), because allowing it would let
+// trackers and ads through whenever Firefox is slow. HYBRID_FAIL_OPEN=1
+// allows both, as earlier versions did.
+void CheckTimedOut(int req) {
+  auto it = g_checks.find(req);
+  if (it == g_checks.end()) return;
+  const bool allowed =
+      it->second.kind == "navigation" || std::getenv("HYBRID_FAIL_OPEN") != nullptr;
+  auto d = Event("check-timeout", it->second.tab);
+  d->SetString("url", it->second.url);
+  d->SetString("kind", it->second.kind);
+  d->SetBool("allowed", allowed);
+  Emit(d);
+  Log(std::string("privacy check timed out, ") + (allowed ? "allowed: " : "blocked: ") +
+      it->second.url);
   Verdict v;
-  v.reason = reason;
-  ResolveCheckWith(req, v, from_timeout);
+  if (!allowed) v.reason = "no verdict";
+  ResolveCheckWith(req, v, true);
 }
 
 void StartCheck(int browser_id, std::string url, std::string top,
@@ -765,8 +835,10 @@ void StartCheck(int browser_id, std::string url, std::string top,
   d->SetString("jar", jar);
   d->SetInt("type", type);
   Emit(d);
-  // Never hang a page on a missing answer: allow after a short wait.
-  CefPostDelayedTask(TID_UI, base::BindOnce(&ResolveCheck, req, std::string(), true), 1500);
+  // Never hang a page on a missing answer (see CheckTimedOut).
+  int timeout_ms = 1500;
+  if (const char* e = std::getenv("HYBRID_CHECK_TIMEOUT_MS")) timeout_ms = std::max(50, std::atoi(e));
+  CefPostDelayedTask(TID_UI, base::BindOnce(&CheckTimedOut, req), timeout_ms);
 }
 
 void ResolveCheckWith(int req, const Verdict& v, bool from_timeout) {
@@ -775,9 +847,10 @@ void ResolveCheckWith(int req, const Verdict& v, bool from_timeout) {
   PendingCheck pc = std::move(it->second);
   g_checks.erase(it);
   g_check_by_key.erase(pc.key);
-  if (from_timeout) {
-    Log("privacy check timed out, allowed: " + pc.url);
-  } else if (v.cache && v.redirect_url.empty() && !v.has_body) {
+  // Timeouts and "no verdict" answers are never cached: the next request
+  // asks again.
+  if (!from_timeout && v.cache && v.reason != "no verdict" && v.redirect_url.empty() &&
+      !v.has_body) {
     g_verdicts[pc.cache_key] = v.reason;
   }
   for (size_t i = 0; i < pc.callbacks.size(); i++) {
@@ -828,16 +901,21 @@ class HostClient : public CefClient,
                                    CefRefPtr<CefFrame> frame,
                                    CefRefPtr<CefRequest> request,
                                    CefRefPtr<CefCallback> callback) override {
-    if (std::getenv("HYBRID_NO_PROTECTION")) return RV_CONTINUE;
+    if (std::getenv("HYBRID_NO_PROTECTION") || !browser) return RV_CONTINUE;
     const std::string url = request->GetURL().ToString();
-    if (!IsWeb(url) || !browser) return RV_CONTINUE;
     const bool nav = request->GetResourceType() == RT_MAIN_FRAME;
+    if (nav) SetNavUrl(browser->GetIdentifier(), url);  // even for data: pages
+    if (!IsWeb(url)) return RV_CONTINUE;
     std::string top;
     if (!nav) {
       CefRefPtr<CefFrame> main = browser->GetMainFrame();
       top = main ? main->GetURL().ToString() : "";
-      if (!IsWeb(top)) return RV_CONTINUE;
-      if (!g_check_all && HostOf(top) == HostOf(url)) return RV_CONTINUE;
+      // Not committed yet: use the page being loaded. If even that isn't a
+      // web page (data:, about:blank), the request is still checked, with
+      // no top page; it is never let through unchecked.
+      if (!IsWeb(top)) top = NavUrl(browser->GetIdentifier());
+      if (!IsWeb(top)) top.clear();
+      if (!g_check_all && !top.empty() && HostOf(top) == HostOf(url)) return RV_CONTINUE;
     }
     CefPostTask(TID_UI, base::BindOnce(&StartCheck, browser->GetIdentifier(),
                                        url, top,
@@ -845,6 +923,14 @@ class HostClient : public CefClient,
                                        (int)request->GetResourceType(), request,
                                        callback));
     return RV_CONTINUE_ASYNC;
+  }
+
+  // IO thread: a redirected page load changes the page being loaded.
+  void OnResourceRedirect(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>,
+                          CefRefPtr<CefRequest> request, CefRefPtr<CefResponse>,
+                          CefString& new_url) override {
+    if (browser && request->GetResourceType() == RT_MAIN_FRAME)
+      SetNavUrl(browser->GetIdentifier(), new_url.ToString());
   }
 
   // IO thread: serve a response an extension substituted for this request.
@@ -960,6 +1046,10 @@ class HostClient : public CefClient,
   void OnBeforeClose(CefRefPtr<CefBrowser> b) override {
     int id = TabIdFor(b);
     g_browser_to_tab.erase(b->GetIdentifier());
+    {
+      std::lock_guard<std::mutex> lock(g_nav_mutex);
+      g_nav_url.erase(b->GetIdentifier());
+    }
     auto it = g_tabs.find(id);
     if (it != g_tabs.end()) {
       if (it->second.container) {
@@ -1176,6 +1266,17 @@ void HandleLine(const std::string& line) {
     jar->StartPoll();
     return;
   }
+  if (cmd == "cookies-dump") {
+    Jar* jar = GetJar(JarName(c));
+    if (jar->retired || !jar->Manager()->VisitAllCookies(new CookieDumper(jar->name))) {
+      // No store (or nothing to visit): report an empty jar.
+      auto d = Event("cookies");
+      d->SetString("jar", jar->name);
+      d->SetList("cookies", CefListValue::Create());
+      Emit(d);
+    }
+    return;
+  }
   if (cmd == "private-end") {
     // The last private window closed: forget the in-memory profile entirely
     // (cookies, storage, cache). The next private window gets a fresh one.
@@ -1333,10 +1434,17 @@ void StdinThread() {
 
 // ------------------------------------------------------------------ app --
 
+// Space-separated switches; double quotes keep a value with spaces together,
+// e.g. --host-resolver-rules="MAP *.test 127.0.0.1".
 void AppendFlags(CefRefPtr<CefCommandLine> command_line, const std::string& all) {
   std::string tok;
+  bool quoted = false;
   for (size_t i = 0; i <= all.size(); i++) {
-    if (i == all.size() || all[i] == ' ') {
+    if (i < all.size() && all[i] == '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (i == all.size() || (all[i] == ' ' && !quoted)) {
       if (tok.rfind("--", 0) == 0) {
         std::string sw = tok.substr(2);
         size_t eq = sw.find('=');

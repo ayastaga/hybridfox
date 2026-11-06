@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Hybrid browser prototype: one-time setup.
+# HybridFox: one-time setup.
 #
-#   ./setup.sh            download CEF + Firefox, build the Chromium engine host
-#   ./setup.sh --update   re-download Firefox and CEF at their latest versions
+#   ./setup.sh            download the pinned CEF + Firefox, build the engine hosts
+#   ./setup.sh --update   move the pins in versions.json to the latest releases,
+#                         download those, and rebuild
 #
 # Needs: bash, curl, tar, xz, bzip2, python3, cmake (3.21+), g++ (C++20), make,
 # and X11 development headers. Disk: about 4 GB.
@@ -34,32 +35,19 @@ if (( ${#missing[@]} )); then
   exit 1
 fi
 case "$(uname -m)" in
-  x86_64)        CEF_PLATFORM=linux64;    FF_OS=linux64;         CEF_ARCH=x86_64 ;;
-  aarch64|arm64) CEF_PLATFORM=linuxarm64; FF_OS=linux64-aarch64; CEF_ARCH=arm64 ;;
+  x86_64)        CEF_ARCH=x86_64 ;;
+  aarch64|arm64) CEF_ARCH=arm64 ;;
   *) die "Unsupported CPU $(uname -m). Supported: x86_64 and aarch64 (ARM64)." ;;
 esac
 mkdir -p "$TP"
 
-# ------------------------------------------------------------------ CEF --
-if [[ ! -d "$TP/cef" || $UPDATE == 1 ]]; then
-  say "Finding the latest stable CEF (Chromium Embedded Framework) build"
-  read -r CEF_NAME < <(curl -fsSL https://cef-builds.spotifycdn.com/index.json | python3 -c '
-import json, sys
-for v in json.load(sys.stdin)[sys.argv[1]]["versions"]:
-    if v["channel"] == "stable":
-        for f in v["files"]:
-            if f["type"] == "minimal":
-                print(f["name"]); sys.exit()
-' "$CEF_PLATFORM")
-  [[ -n "$CEF_NAME" ]] || die "Could not find a CEF build."
-  say "Downloading $CEF_NAME (about 330 MB)"
-  URL="https://cef-builds.spotifycdn.com/$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$CEF_NAME")"
-  curl -fL --progress-bar -o "$TP/cef.tar.bz2" "$URL"
-  rm -rf "$TP/cef" "$TP"/cef_binary_*
-  tar -xjf "$TP/cef.tar.bz2" -C "$TP"
-  mv "$TP"/cef_binary_* "$TP/cef"
-  rm -f "$TP/cef.tar.bz2"
-  rm -rf "$ROOT/engine/build"
+# ---------------------------------------------------------- downloads --
+# Firefox and CEF at the exact versions pinned in versions.json, checked
+# against their published checksums (see scripts/deps.py).
+if (( UPDATE )); then
+  python3 "$ROOT/scripts/deps.py" update
+else
+  python3 "$ROOT/scripts/deps.py" fetch
 fi
 
 # ---------------------------------------------------- runtime libraries --
@@ -108,16 +96,6 @@ else
   echo "  then run ./setup.sh again."
 fi
 
-# -------------------------------------------------------------- Firefox --
-if [[ ! -x "$TP/firefox/firefox" || $UPDATE == 1 ]]; then
-  say "Downloading the latest Firefox release (official build from mozilla.org)"
-  curl -fL --progress-bar -o "$TP/firefox.tar" \
-    "https://download.mozilla.org/?product=firefox-latest-ssl&os=$FF_OS&lang=en-US"
-  rm -rf "$TP/firefox"
-  tar -xf "$TP/firefox.tar" -C "$TP"
-  rm -f "$TP/firefox.tar"
-fi
-
 say "Installing the hybrid layer into Firefox"
 install -Dm644 "$ROOT/shell/autoconfig.js" "$TP/firefox/defaults/pref/autoconfig.js"
 install -Dm644 "$ROOT/shell/hybrid.cfg" "$TP/firefox/hybrid.cfg"
@@ -125,5 +103,5 @@ install -Dm644 "$ROOT/shell/hybrid.cfg" "$TP/firefox/hybrid.cfg"
 # `./setup.sh --update` instead.
 install -Dm644 "$ROOT/shell/policies.json" "$TP/firefox/distribution/policies.json"
 
-chmod +x "$ROOT/hybrid"
-say "Done. Start the browser with: $ROOT/hybrid"
+chmod +x "$ROOT/hybridfox"
+say "Done. Start the browser with: $ROOT/hybridfox"

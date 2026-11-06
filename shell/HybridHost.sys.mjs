@@ -38,6 +38,7 @@ const BYPASS = new Set([
 const windows = new Map(); // winId -> { window, handler, isPrivate, marker, markerTimer }
 const tabOwner = new Map(); // tabId -> { winId, engine }
 const flushWaiters = new Map();
+let shuttingDown = false; // Firefox is quitting: engine exits are expected
 let nextWinId = 1;
 let nextTabId = 1;
 let nextReq = 1;
@@ -56,6 +57,9 @@ class Engine {
     this.attached = new Set();
     this.attaching = new Set();
     this.jars = { normal: { started: false, ready: false }, private: { started: false, ready: false } };
+    this.quitting = false; // we asked it to quit
+    this.crashes = []; // when it exited unexpectedly (ms), for the restart limit
+    this.restarts = 0;
   }
 
   get available() {
@@ -108,6 +112,7 @@ class Engine {
       return;
     }
     this.starting = true;
+    this.quitting = false;
     // Engines render at exactly Firefox's scale, so all tabs match.
     const anyWindow = [...windows.values()][0]?.window;
     const scale = String(Math.round((anyWindow?.devicePixelRatio || 1) * 1000) / 1000);
@@ -128,14 +133,62 @@ class Engine {
     log(`${this.info.label} engine started at scale`, scale);
     readLines(this.proc.stdout, line => onEngineLine(this, line));
     readLines(this.proc.stderr, line => debug(`${this.name}:`, line));
-    this.proc.wait().then(({ exitCode }) => {
+    const proc = this.proc;
+    proc.wait().then(({ exitCode }) => {
       log(`${this.info.label} engine exited with code`, exitCode);
-      this.proc = null;
-      this.ready = false;
-      this.attached.clear();
-      this.attaching.clear();
-      if (!this.failure) this.fail(`The ${this.info.label} engine stopped. Restart the browser to use ${this.info.label} tabs again.`);
+      if (this.proc === proc) this.onExit(exitCode);
     });
+  }
+
+  // Forget everything that belonged to the process that just exited.
+  reset() {
+    this.proc = null;
+    this.ready = false;
+    this.attached.clear();
+    this.attaching.clear();
+    // Queued commands were for the old process; windows re-send what the
+    // new one needs (onEngineRestart).
+    this.pending = [];
+    for (const jar of Object.values(this.jars)) {
+      jar.started = false;
+      jar.ready = false;
+    }
+    for (const [key, done] of flushWaiters) {
+      if (key.startsWith(this.name + ":")) {
+        flushWaiters.delete(key);
+        done();
+      }
+    }
+  }
+
+  // The process exited. Expected when we asked it to quit or Firefox is
+  // shutting down; otherwise it crashed (or was killed): start a new one
+  // and have every window reopen its tabs there, at their last address and
+  // with the same tab ids. A crash loop isn't worth chasing: after
+  // MAX_CRASHES within CRASH_WINDOW_MS, give up and mark its tabs dead.
+  onExit(exitCode) {
+    const expected = this.quitting || shuttingDown;
+    this.reset();
+    if (expected || this.failure) return;
+    const now = Date.now();
+    this.crashes = this.crashes.filter(t => now - t < CRASH_WINDOW_MS);
+    this.crashes.push(now);
+    if (this.crashes.length >= MAX_CRASHES) {
+      this.fail(`The ${this.info.label} engine stopped unexpectedly ${this.crashes.length} times in ` +
+        `${CRASH_WINDOW_MS / 60000} minutes, so it won't be restarted. Restart the browser to use ` +
+        `${this.info.label} tabs again.`);
+      return;
+    }
+    this.restarts++;
+    log(`${this.info.label} engine stopped unexpectedly (exit code ${exitCode}); restarting it`);
+    this.start();
+    for (const [winId, w] of windows) {
+      try {
+        w.handler.onEngineRestart(this.name);
+      } catch (e) {
+        console.error("[hybrid] reopening tabs failed in window", winId, e);
+      }
+    }
   }
 
   fail(msg) {
@@ -158,7 +211,14 @@ class Engine {
   }
 }
 
+const MAX_CRASHES = 3;
+const CRASH_WINDOW_MS = 2 * 60 * 1000;
+
 const engines = Object.fromEntries(Object.keys(ENGINES).map(n => [n, new Engine(n)]));
+
+Services.obs.addObserver(() => {
+  shuttingDown = true;
+}, "quit-application-granted");
 
 async function readLines(pipe, onLine) {
   let buf = "";
@@ -281,6 +341,10 @@ function onEngineLine(engine, line) {
     case "classify":
       classify(engine, ev);
       return;
+    case "check-timeout":
+      // The engine gave up waiting for a verdict (see classify()).
+      log(`${engine.info.label}: no verdict in time for ${ev.kind}`, ev.url, ev.allowed ? "(allowed)" : "(blocked)");
+      break; // also delivered to the tab's window below
     case "private-ended":
     case "focused":
     case "unfocused":
@@ -332,28 +396,48 @@ const Bridge = {
 Bridge.active = Bridge.compute();
 setInterval(() => Bridge.refresh(), 3000);
 
+// When a check can't produce an answer, subresources are blocked ("fail
+// closed") so a broken check can't silently let trackers through; page loads
+// are allowed so browsing never becomes impossible. HYBRID_FAIL_OPEN=1 allows
+// both, as earlier versions did.
+const FAIL_OPEN = !!env.get("HYBRID_FAIL_OPEN");
+const NO_VERDICT = "no verdict";
+const noVerdictFor = ev => (ev.kind === "resource" && !FAIL_OPEN ? NO_VERDICT : "");
+
+// What engines asked about, by engine/kind/scheme (debugState, docs).
+const classifyStats = {};
+
 async function classify(engine, ev) {
+  const scheme = /^([a-z]+):/i.exec(ev.url || "")?.[1] || "?";
+  const statKey = `${engine.name}/${ev.kind}/${scheme}`;
+  classifyStats[statKey] = (classifyStats[statKey] || 0) + 1;
   let reason = "";
   let reply = {};
-  try {
-    reason = await HybridPrivacy.classify(ev);
-  } catch (e) {
-    log("privacy check failed", e);
-  }
   // Firefox's own verdicts depend only on the sites involved, so the engine
   // may reuse them; extension verdicts depend on the exact request.
   let cache = true;
+  try {
+    reason = await HybridPrivacy.classify(ev);
+  } catch (e) {
+    log("privacy check failed for", ev.url, e);
+    reason = noVerdictFor(ev);
+    cache = false;
+  }
   if (!reason && ev.kind === "resource" && Bridge.active && tabOwner.has(ev.id)) {
     cache = false;
     const owner = tabOwner.get(ev.id);
     const entry = windows.get(owner.winId);
     try {
       const r = await entry?.handler.probe(ev);
-      if (r?.block) reason = "extension";
-      else if (r?.redirectBody !== undefined) reply = { redirectBody: r.redirectBody, redirectMime: r.redirectMime || "" };
-      else if (r?.redirectURL) reply = { redirectURL: r.redirectURL };
+      if (!r || r.noVerdict) {
+        log("extension check gave no verdict for", ev.url, r?.note || "");
+        reason = noVerdictFor(ev);
+      } else if (r.block) reason = "extension";
+      else if (r.redirectBody !== undefined) reply = { redirectBody: r.redirectBody, redirectMime: r.redirectMime || "" };
+      else if (r.redirectURL) reply = { redirectURL: r.redirectURL };
     } catch (e) {
-      debug("extension probe failed", e);
+      log("extension check failed for", ev.url, e);
+      reason = noVerdictFor(ev);
     }
   }
   if (reason) debug("blocking", ev.kind, ev.url, `(${reason})`);
@@ -554,7 +638,9 @@ export const HybridHost = {
   },
 
   // A browser window joins. |handler| receives onEvent(event),
-  // onEngineFail(engine, message) and probe(request) -> verdict.
+  // onEngineFail(engine, message), onEngineRestart(engine) (the engine
+  // crashed and a new process is starting: reopen its tabs) and
+  // probe(request) -> verdict.
   registerWindow(window, handler, isPrivate) {
     const winId = nextWinId++;
     windows.set(winId, { window, handler, isPrivate });
@@ -586,7 +672,11 @@ export const HybridHost = {
       log("private session ended; private engine profiles discarded");
     }
     if (windows.size === 0) {
-      for (const engine of Object.values(engines)) if (engine.proc) engine.write({ cmd: "quit" });
+      for (const engine of Object.values(engines)) {
+        if (!engine.proc) continue;
+        engine.quitting = true;
+        engine.write({ cmd: "quit" });
+      }
     }
   },
 
@@ -615,6 +705,28 @@ export const HybridHost = {
 
   send(engine, obj) {
     engines[engine]?.send(obj);
+  },
+
+  // A snapshot of the session, for tests and debugging.
+  debugState() {
+    return {
+      failOpen: FAIL_OPEN,
+      classified: { ...classifyStats },
+      bridgeActive: Bridge.active,
+      windows: [...windows.entries()].map(([id, w]) => ({ id, isPrivate: !!w.isPrivate })),
+      tabs: [...tabOwner.entries()].map(([id, o]) => ({ id, ...o })),
+      engines: Object.fromEntries(Object.values(engines).map(e => [e.name, {
+        running: !!e.proc,
+        pid: e.proc?.pid ?? null,
+        crashes: e.crashes.length,
+        restarts: e.restarts,
+        ready: e.ready,
+        failure: e.failure,
+        attached: [...e.attached],
+        pending: e.pending.length,
+        jars: e.jars,
+      }])),
+    };
   },
 
   // Ask an engine for its latest cookies and wait until Firefox has them.

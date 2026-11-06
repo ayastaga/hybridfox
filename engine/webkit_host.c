@@ -1,4 +1,4 @@
-/* webkit_host: the WebKit engine of the hybrid browser (WebKitGTK).
+/* webkit_host: the WebKit engine of HybridFox (WebKitGTK).
  *
  * Speaks the same line protocol as chromium_host: JSON commands on stdin,
  * "@@"-prefixed JSON events on stdout. Each WebKit "tab" is a WebKitWebView
@@ -197,11 +197,14 @@ static double cookie_expires(SoupCookie *c) {
   return dt ? (double)g_date_time_to_unix(dt) : 0;
 }
 
+/* Equal for mirroring purposes. SameSite counts, so a SameSite-only change
+   reaches the other engines too. */
 static gboolean same_cookie(SoupCookie *a, SoupCookie *b) {
   gboolean sa = soup_cookie_get_expires(a) == NULL, sb = soup_cookie_get_expires(b) == NULL;
   return g_strcmp0(soup_cookie_get_value(a), soup_cookie_get_value(b)) == 0 &&
          soup_cookie_get_secure(a) == soup_cookie_get_secure(b) &&
          soup_cookie_get_http_only(a) == soup_cookie_get_http_only(b) && sa == sb &&
+         soup_cookie_get_same_site_policy(a) == soup_cookie_get_same_site_policy(b) &&
          (sa || fabs(cookie_expires(a) - cookie_expires(b)) < 120);
 }
 
@@ -345,6 +348,32 @@ static void jar_delete(Jar *jar, SoupCookie *c) {
 }
 
 static void jar_poll(Jar *jar);
+
+/* Debugging and tests: the jar's cookies straight from WebKit's store (not
+   from what the mirroring believes), as one "cookies" event. */
+static void dump_finished(GObject *src, GAsyncResult *res, gpointer user) {
+  char *name = user;
+  GList *list = webkit_cookie_manager_get_all_cookies_finish(WEBKIT_COOKIE_MANAGER(src), res, NULL);
+  JsonBuilder *b = event("cookies", -1);
+  add_str(b, "jar", name);
+  json_builder_set_member_name(b, "cookies");
+  json_builder_begin_array(b);
+  for (GList *l = list; l; l = l->next) {
+    SoupCookie *c = l->data;
+    json_builder_begin_object(b);
+    add_str(b, "domain", soup_cookie_get_domain(c));
+    add_str(b, "path", soup_cookie_get_path(c));
+    add_str(b, "name", soup_cookie_get_name(c));
+    add_str(b, "value", soup_cookie_get_value(c));
+    add_str(b, "sameSite", same_site_name(soup_cookie_get_same_site_policy(c)));
+    add_bool(b, "httpOnly", soup_cookie_get_http_only(c));
+    json_builder_end_object(b);
+  }
+  json_builder_end_array(b);
+  emit(b);
+  g_list_free_full(list, (GDestroyNotify)soup_cookie_free);
+  g_free(name);
+}
 
 static void poll_finished(GObject *src, GAsyncResult *res, gpointer user) {
   Jar *jar = user;
@@ -590,9 +619,20 @@ static void resolve_check(int req, const char *reason) {
   g_hash_table_remove(checks, GINT_TO_POINTER(req));
 }
 
+/* Firefox didn't answer in time. This host only checks page loads, and a
+   stalled check must never make browsing impossible, so the load goes ahead
+   (Chromium tabs do the same for page loads; see chromium_host.cc). */
 static gboolean check_timeout(gpointer req) {
-  if (g_hash_table_contains(checks, req)) {
-    log_msg("privacy check timed out, allowed");
+  Check *c = g_hash_table_lookup(checks, req);
+  if (c) {
+    JsonBuilder *b = event("check-timeout", c->tab);
+    add_str(b, "url", c->url);
+    add_str(b, "kind", "navigation");
+    add_bool(b, "allowed", TRUE);
+    emit(b);
+    char *msg = g_strdup_printf("privacy check timed out, allowed: %s", c->url);
+    log_msg(msg);
+    g_free(msg);
     resolve_check(GPOINTER_TO_INT(req), "");
   }
   return G_SOURCE_REMOVE;
@@ -672,7 +712,8 @@ static gboolean on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebK
   add_str(b, "top", "");
   add_str(b, "jar", t->jar);
   emit(b);
-  g_timeout_add(1500, check_timeout, GINT_TO_POINTER(req));
+  const char *ms = getenv("HYBRID_CHECK_TIMEOUT_MS");
+  g_timeout_add(ms ? MAX(50, atoi(ms)) : 1500, check_timeout, GINT_TO_POINTER(req));
   return TRUE;
 }
 
@@ -912,6 +953,9 @@ static void handle_line(const char *line) {
     int req = json_object_get_int_member(c, "req");
     g_array_append_val(jar->flush_reqs, req);
     jar_poll(jar);
+  } else if (!strcmp(cmd, "cookies-dump")) {
+    Jar *jar = get_jar(jar_name(c));
+    webkit_cookie_manager_get_all_cookies(jar_cookies(jar), NULL, dump_finished, g_strdup(jar->name));
   } else if (!strcmp(cmd, "private-end")) {
     GList *vals = g_hash_table_get_values(tabs);
     for (GList *l = vals; l; l = l->next)
