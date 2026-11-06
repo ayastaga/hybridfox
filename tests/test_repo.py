@@ -41,12 +41,14 @@ def test_shell_loaded_from_resource_url():
 
 def test_chromium_host_finds_libcef_next_to_itself():
     """Without an $ORIGIN rpath, libcef.so loads from the CEF source folder
-    and ICU data isn't found."""
+    and ICU data isn't found; with "." in it, from the current directory."""
     if not os.access(HOSTS["blink"], os.X_OK):
         pytest.skip("blink host isn't built")
     dyn = subprocess.run(["readelf", "-d", HOSTS["blink"]], capture_output=True, text=True).stdout
     paths = re.search(r"\((?:RUNPATH|RPATH)\)\s+Library r(?:un)?path: \[(.*)\]", dyn)
     assert paths and "$ORIGIN" in paths.group(1).split(":"), dyn
+    # "." would load libraries from the current directory (hijackable).
+    assert not {".", ""} & set(paths.group(1).split(":")), paths.group(1)
     ldd = subprocess.run(["ldd", HOSTS["blink"]], capture_output=True, text=True).stdout
     libcef = next(line for line in ldd.splitlines() if "libcef.so" in line)
     assert os.path.dirname(HOSTS["blink"]) in libcef, libcef

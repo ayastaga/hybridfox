@@ -11,6 +11,11 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(CEF REQUIRED)
+# CEF adds "-Wl,-rpath,.", which makes the host load libraries (libcef.so
+# included) from whatever directory it is started in: anyone who can put a
+# file there can run code in the browser. $ORIGIN (below) already finds the
+# libraries next to the executable, so drop the "." entry.
+list(REMOVE_ITEM CEF_LINKER_FLAGS "-Wl,-rpath,.")
 add_subdirectory(${CEF_LIBCEF_DLL_WRAPPER_PATH} libcef_dll_wrapper)
 
 set(OUT "${CMAKE_CURRENT_BINARY_DIR}/out")
