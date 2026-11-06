@@ -120,6 +120,9 @@ class H(http.server.BaseHTTPRequestHandler):
                     "path": u.path, "query": u.query, "host": self.headers.get("Host", ""),
                     "engine": engine_of(self.headers.get("User-Agent", "")),
                     "user": self.user(), "t": time.time(),
+                    # Privacy signals extensions may add to requests.
+                    "dnt": self.headers.get("DNT"), "gpc": self.headers.get("Sec-GPC"),
+                    "websocket": self.headers.get("Upgrade", "").lower() == "websocket",
                 })
 
         if u.path == "/_log":
@@ -202,6 +205,45 @@ fetch('/_report?script=' + v);
             return self.send("window.thirdPartyVersion = 'real';", "application/javascript")
         if u.path == "/redirected.js":
             return self.send("window.thirdPartyVersion = 'redirected';", "application/javascript")
+        # ---- extension-bridge coverage (docs/extension-bridge.md)
+        if u.path == "/fx/clearurls":
+            # Tracking parameters on a third-party image; ClearURLs strips
+            # them by redirecting the request.
+            via = arg("via", "localhost:%d" % PORT)
+            return self.send("""<!doctype html><title>ClearURLs fixture</title>
+<img src="http://%s/pixel.svg?utm_source=newsletter&utm_medium=email&id=7" width=4 height=4>""" % html.escape(via))
+        if u.path == "/fx/websocket":
+            via = arg("via", "localhost:%d" % PORT)
+            return self.send("""<!doctype html><title>WebSocket fixture</title><script>
+const ws = new WebSocket('ws://%s/ws');
+ws.onerror = ws.onclose = () => fetch('/_report?ws=closed');
+</script>""" % html.escape(via))
+        if u.path == "/ws":
+            return self.send("no websockets here", "text/plain", status=400)
+
+        # ---- for scripts/bench.py
+        if u.path == "/many":
+            # N third-party images, to measure the cost of checking each one.
+            n, via = int(arg("n", "50")), arg("via", "localhost:%d" % PORT)
+            imgs = "".join('<img src="http://%s/pixel.svg?i=%d" width=4 height=4>' % (html.escape(via), i)
+                           for i in range(n))
+            return self.send("<!doctype html><title>Many</title><body>" + imgs)
+        if u.path == "/setprobe":
+            # Readable from page script (not HttpOnly), so another engine's
+            # page can see the moment it arrives.
+            return self.send("<!doctype html><title>set</title>",
+                             cookies=["probe=%s; Path=/; Max-Age=3600; SameSite=Lax" % arg("v", "1")])
+        if u.path == "/cookiewatch":
+            want = arg("v", "1")
+            return self.send("""<!doctype html><title>watching</title><script>
+const want = 'probe=%s';
+const t = setInterval(() => {
+  if (document.cookie.split('; ').includes(want)) {
+    clearInterval(t);
+    fetch('/_report?seen=' + encodeURIComponent(want));
+  }
+}, 10);
+</script>""" % html.escape(want))
         if u.path == "/tracker-test":
             return self.send("""<!doctype html><title>Tracker test</title>
 <body style="font:22px sans-serif;margin:30px"><h1>Tracker test</h1>
@@ -220,10 +262,17 @@ and a third-party image that is not a tracker.</p>
 """ + ENGINE_JS + """
 document.getElementById('engine').textContent = 'Engine: ' + engine;
 const a = window.adsbygoogle;
-const standIn = !!(a && a.loaded);
+// Google's real script leaves {loaded, pageState, push}; uBlock Origin's
+// stand-in only {loaded, push} (measured 2026-11, uBlock Origin 1.75.4).
+const standIn = !!(a && a.loaded === true && !('pageState' in a));
 document.getElementById('ads').innerHTML = standIn
   ? '<b style="color:#1d7f4e">Ad script replaced by a stand-in</b>'
   : '<b style="color:#b4232a">No stand-in: the ad script was not intercepted</b>';
+// What the ad script left behind, to tell the real one from a stand-in.
+const info = a ? { isArray: Array.isArray(a), keys: Object.keys(a).sort().join(','),
+  push: typeof a.push === 'function' ? a.push.toString().length : -1,
+  scripts: document.scripts.length, iframes: document.querySelectorAll('iframe').length } : null;
+fetch('/_report?adsinfo=' + encodeURIComponent(JSON.stringify(info)));
 const img = document.getElementById('dc');
 const report = loaded => fetch('/_report?standin=' + standIn + '&doubleclick=' + (loaded ? 'loaded' : 'blocked'));
 if (img.complete) report(img.naturalWidth > 0);
