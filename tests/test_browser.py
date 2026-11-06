@@ -334,8 +334,8 @@ def test_safe_browsing_sends_unsafe_page_to_gecko(browser, site):
     browser.wait_tab(i, lambda t: t["engine"] == "blink" and not t["loading"], what="Blink tab")
     browser.m.js("HybridTest.navigate(arguments[0], 'http://itisatrap.org/firefox/its-a-trap.html')", i)
     # Firefox's own warning page explains the danger, so the tab moves to Gecko.
-    t = browser.wait_tab(i, lambda t: t["engine"] == "gecko", what="tab moved to Gecko")
-    assert "its-a-trap" in (t["url"] or "") or "phishing" in (t["url"] or "")
+    browser.wait_tab(i, lambda t: t["engine"] == "gecko" and "its-a-trap" in (t["url"] or ""),
+                     what="tab moved to Gecko, on the flagged page")
     assert "Safe Browsing blocked" in browser.log_text()
 
 
@@ -390,3 +390,19 @@ def test_no_chromium_profile_left_on_disk(tmp_path, site):
     finally:
         b.quit()
     assert not [p.name for p in runtime.iterdir() if p.name.startswith("hybrid-chromium-")]
+
+
+def test_firefox_page_opens_engine_start_page(browser, site):
+    """Firefox's own pages (new tab, home) can't be shown by other engines:
+    the engine shows a start page, and Gecko gets the new tab page back."""
+    i = browser.m.js("return gBrowser.tabs.indexOf(gBrowser.selectedTab)")  # about:blank start tab
+    browser.m.js("HybridTest.switchEngine('blink', null, arguments[0])", i)
+    t = browser.wait_tab(i, lambda t: t["engine"] == "blink" and t["loads"], what="Blink start page")
+    assert t["url"].endswith("/shell/start.html?engine=blink"), t
+    assert browser.wait_tab(i, lambda t: t["title"] == "New Blink tab", what="start page title")
+    assert browser.m.js("return gURLBar.value") == ""  # not file:///...start.html
+    browser.m.js("HybridTest.switchEngine('webkit', null, arguments[0])", i)
+    t = browser.wait_tab(i, lambda t: t["engine"] == "webkit" and t["loads"], what="WebKit start page")
+    assert t["url"].endswith("/shell/start.html?engine=webkit"), t
+    browser.m.js("HybridTest.switchEngine('gecko', null, arguments[0])", i)
+    browser.wait_tab(i, lambda t: t["engine"] == "gecko" and t["url"] == "about:newtab", what="Gecko new tab")

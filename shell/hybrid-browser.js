@@ -185,6 +185,23 @@
     return /^(https?|file|data):/i.test(spec) ? spec : "about:blank";
   }
 
+  // Other engines can't show Firefox's own pages (new tab, home, about:*).
+  // A tab switched away from one opens this small page instead of a blank
+  // one, and switching back to Gecko returns to Firefox's new tab page.
+  const START_PAGE = (() => {
+    try {
+      const f = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+      f.initWithPath(env.get("HYBRID_ROOT"));
+      f.append("shell");
+      f.append("start.html");
+      return Services.io.newFileURI(f).spec;
+    } catch (e) {
+      return "about:blank";
+    }
+  })();
+  const isStartPage = spec => !!spec && (spec === "about:blank" || spec.split("?")[0] === START_PAGE);
+  const startPageFor = engine => (START_PAGE === "about:blank" ? START_PAGE : `${START_PAGE}?engine=${engine}`);
+
   function setTabLabel(tab, label) {
     try {
       gBrowser._setTabLabel(tab, label, { isContentTitle: true });
@@ -522,6 +539,7 @@
   function openInEngine(tab, engine, url) {
     if (!url) url = tab.linkedBrowser.currentURI?.spec || "about:blank";
     url = webURL(url);
+    if (isStartPage(url)) url = startPageFor(engine);
     HybridHost.use(engine, winId);
     usedEngines.add(engine);
     const id = HybridHost.allocTabId(winId, engine);
@@ -534,7 +552,9 @@
     persist(tab);
     if (tab.selected) {
       updateChrome();
-      send(engine, { cmd: "focus", id });
+      // On the start page the next step is typing an address.
+      if (isStartPage(url)) window.setTimeout(() => gURLBar.focus(), 0);
+      else send(engine, { cmd: "focus", id });
     }
   }
 
@@ -564,7 +584,7 @@
     // The user chose Gecko for this site in this tab: don't bounce it back
     // because of a site rule.
     tab._hybridManualGecko = siteOf(target);
-    geckoLoad(tab.linkedBrowser, target === "about:blank" ? "about:newtab" : target);
+    geckoLoad(tab.linkedBrowser, isStartPage(target) ? "about:newtab" : target);
     if (tab.selected) {
       updateChrome();
       tab.linkedBrowser.focus();
@@ -709,7 +729,7 @@
         : "This tab runs on Firefox’s engine. Click to choose an engine (Ctrl+Alt+E cycles)."
     );
     if (!h) return;
-    tab.linkedBrowser.userTypedValue = h.url === "about:blank" ? "" : h.url;
+    tab.linkedBrowser.userTypedValue = isStartPage(h.url) ? "" : h.url;
     if (!gURLBar.focused) gURLBar.value = tab.linkedBrowser.userTypedValue;
     // Firefox recomputes these from the placeholder; overwrite after it.
     const apply = () => {
